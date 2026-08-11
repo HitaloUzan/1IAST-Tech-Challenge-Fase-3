@@ -216,3 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Dados gerados
+data/**/*.parquet
+
+# Ambiente virtual
+.venv/
+
+# Cache do Python
+__pycache__/
+*.pyc
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
+
+# Dados gerados
+data/**/*.parquet
+
+# Modelos treinados
+models/*.joblib
+
+# Arquivos temporários
+*.log
