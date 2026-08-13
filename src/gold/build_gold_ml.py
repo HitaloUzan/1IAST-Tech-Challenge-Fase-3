@@ -16,10 +16,12 @@ sys.path.insert(0, ".")
 
 import config
 
+
 GCP_PROJECT_ID = config.GCP_PROJECT_ID
 BQ_DATASET_GOLD = config.BQ_DATASET_GOLD
 BQ_DATASET_SILVER = config.BQ_DATASET_SILVER
 ML_FEATURES_TABLE = config.ML_FEATURES_TABLE
+
 
 ML_GOLD_TABLES = {
 
@@ -32,6 +34,9 @@ ML_GOLD_TABLES = {
                 id_municipio,
                 serie,
                 rede,
+                presenca,
+                preenchimento_caderno,
+                peso_aluno,
                 alfabetizado
 
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET_SILVER}.alunos_clean`
@@ -64,6 +69,12 @@ ML_GOLD_TABLES = {
 
             a.rede,
 
+            a.presenca,
+
+            a.preenchimento_caderno,
+
+            a.peso_aluno,
+
             m.meta_alfabetizacao_2030,
 
             m.percentual_participacao,
@@ -85,37 +96,71 @@ ML_GOLD_TABLES = {
            AND a.rede = m.rede
 
     """
-     }
-def ensure_dataset(client: bigquery.Client, dataset_id: str) -> None:
-    dataset_ref = bigquery.Dataset(f"{GCP_PROJECT_ID}.{dataset_id}")
+}
+
+
+def ensure_dataset(
+    client: bigquery.Client,
+    dataset_id: str
+) -> None:
+
+    dataset_ref = bigquery.Dataset(
+        f"{GCP_PROJECT_ID}.{dataset_id}"
+    )
+
     dataset_ref.location = "US"
-    client.create_dataset(dataset_ref, exists_ok=True)
+
+    client.create_dataset(
+        dataset_ref,
+        exists_ok=True
+    )
 
 
-def build_table(client: bigquery.Client, table_name: str, query: str) -> int:
+def build_table(
+    client: bigquery.Client,
+    table_name: str,
+    query: str
+) -> int:
 
-    destination = f"{GCP_PROJECT_ID}.{BQ_DATASET_GOLD}.{table_name}"
+    destination = (
+        f"{GCP_PROJECT_ID}."
+        f"{BQ_DATASET_GOLD}."
+        f"{table_name}"
+    )
 
     job_config = bigquery.QueryJobConfig(
         destination=destination,
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-        create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
+        write_disposition=(
+            bigquery.WriteDisposition.WRITE_TRUNCATE
+        ),
+        create_disposition=(
+            bigquery.CreateDisposition.CREATE_IF_NEEDED
+        ),
     )
 
-    log.info(f"Building gold.{table_name} ...")
+    log.info(
+        f"Building gold.{table_name} ..."
+    )
 
-    job = client.query(query, job_config=job_config)
+    job = client.query(
+        query,
+        job_config=job_config
+    )
+
     job.result()
 
     table = client.get_table(destination)
 
-    log.info(f"gold.{table_name} -> {table.num_rows:,} rows")
+    log.info(
+        f"gold.{table_name} -> "
+        f"{table.num_rows:,} rows"
+    )
 
     return table.num_rows
 
 
 def main() -> None:
-    
+
     credentials, _ = google.auth.default()
 
     client = bigquery.Client(
@@ -123,7 +168,10 @@ def main() -> None:
         credentials=credentials
     )
 
-    ensure_dataset(client, BQ_DATASET_GOLD)
+    ensure_dataset(
+        client,
+        BQ_DATASET_GOLD
+    )
 
     start = datetime.now()
 
@@ -133,24 +181,42 @@ def main() -> None:
     for table_name, query in ML_GOLD_TABLES.items():
 
         try:
-            rows = build_table(client, table_name, query)
+
+            rows = build_table(
+                client,
+                table_name,
+                query
+            )
+
             results[table_name] = rows
 
         except Exception as exc:
-            log.error(f"Failed to build gold.{table_name}: {exc}")
+
+            log.error(
+                f"Failed to build gold.{table_name}: "
+                f"{exc}"
+            )
+
             errors.append(table_name)
 
-    elapsed = (datetime.now() - start).total_seconds()
+    elapsed = (
+        datetime.now() - start
+    ).total_seconds()
 
     log.info(
         f"Gold ML build complete in {elapsed:.1f}s | "
-        f"success={len(results)} error={len(errors)}"
+        f"success={len(results)} "
+        f"error={len(errors)}"
     )
 
     if errors:
-        log.error(f"Tables with errors: {errors}")
+
+        log.error(
+            f"Tables with errors: {errors}"
+        )
+
         sys.exit(1)
 
 
 if __name__ == "__main__":
-      main()
+    main()
