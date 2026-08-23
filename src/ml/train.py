@@ -7,7 +7,8 @@ import joblib
 import pandas as pd
 
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
+from xgboost import XGBClassifier
 
 from sklearn.metrics import (
     accuracy_score,
@@ -49,16 +50,7 @@ def build_model(model_name):
     Cria o modelo de acordo com o experimento.
     """
 
-    if model_name == "logistic_baseline":
-
-        return LogisticRegression(
-            max_iter=1000,
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-        )
-
     if model_name == "logistic_balanced":
-
         return LogisticRegression(
             max_iter=1000,
             random_state=RANDOM_STATE,
@@ -67,14 +59,31 @@ def build_model(model_name):
         )
 
     if model_name == "random_forest_balanced":
-
         return RandomForestClassifier(
-            n_estimators=50,
-            max_depth=15,
+            n_estimators=100,
+            max_depth=12,
             min_samples_leaf=2,
             random_state=RANDOM_STATE,
             n_jobs=-1,
             class_weight="balanced",
+        )
+
+    if model_name == "hist_gradient_boosting":
+        return HistGradientBoostingClassifier(
+            max_iter=100,
+            learning_rate=0.1,
+            max_leaf_nodes=31,
+            class_weight="balanced",
+            random_state=RANDOM_STATE,
+        )
+
+    if model_name == "xgboost":
+        return XGBClassifier(
+            n_estimators=200,
+            max_depth=8,
+            learning_rate=0.05,
+            random_state=RANDOM_STATE,
+            n_jobs=-1,
         )
 
     raise ValueError(
@@ -117,7 +126,7 @@ def evaluate_model(
     y_test,
 ):
     """
-    Avalia o modelo e retorna suas métricas.
+    Avalia o modelo e retorna suas métricas globais e por classe.
     """
 
     log.info(
@@ -126,39 +135,28 @@ def evaluate_model(
     )
 
     predictions = model.predict(X_test)
-
     probabilities = model.predict_proba(X_test)[:, 1]
+
+    # Relatório detalhado para extrair recall individual da classe 0 (Não Alfabetizado)
+    report_dict = classification_report(
+        y_test,
+        predictions,
+        output_dict=True,
+    )
 
     metrics = {
         "model": model_name,
-        "accuracy": accuracy_score(
-            y_test,
-            predictions,
-        ),
-        "precision": precision_score(
-            y_test,
-            predictions,
-        ),
-        "recall": recall_score(
-            y_test,
-            predictions,
-        ),
-        "f1": f1_score(
-            y_test,
-            predictions,
-        ),
-        "roc_auc": roc_auc_score(
-            y_test,
-            probabilities,
-        ),
+        "accuracy": accuracy_score(y_test, predictions),
+        "f1_macro": f1_score(y_test, predictions, average="macro"),
+        "recall_nao_alfabetizado": report_dict.get("0", report_dict.get("0.0", {})).get("recall", 0.0),
+        "recall_alfabetizado": report_dict.get("1", report_dict.get("1.0", {})).get("recall", 0.0),
+        "roc_auc": roc_auc_score(y_test, probabilities),
     }
 
     log.info("===== MÉTRICAS =====")
 
     for metric, value in metrics.items():
-
         if metric != "model":
-
             log.info(
                 "%s: %.4f",
                 metric.upper(),
@@ -209,20 +207,6 @@ def save_model(
         "model": model,
         "preprocessor": preprocessor,
         "metrics": metrics,
-        "features_numeric": [
-            "ano",
-            "meta_alfabetizacao_2030",
-            "percentual_participacao",
-            "nivel_alfabetizacao",
-            "peso_aluno",
-        ],
-        "features_categorical": [
-            "serie",
-            "rede",
-            "presenca",
-            "preenchimento_caderno",
-            "possui_meta_municipal",
-        ],
     }
 
     joblib.dump(
@@ -274,9 +258,9 @@ def save_results(results):
             [
                 "model",
                 "accuracy",
-                "precision",
-                "recall",
-                "f1",
+                "f1_macro",
+                "recall_nao_alfabetizado",
+                "recall_alfabetizado",
                 "roc_auc",
             ]
         ].to_string(index=False)
@@ -293,10 +277,7 @@ def main() -> None:
         "Iniciando pipeline de treinamento ML..."
     )
 
-    # --------------------------------------------------------
-    # Autenticação
-    # --------------------------------------------------------
-
+    # Autenticação BigQuery
     credentials, _ = google.auth.default()
 
     client = bigquery.Client(
@@ -304,10 +285,7 @@ def main() -> None:
         credentials=credentials,
     )
 
-    # --------------------------------------------------------
     # Preparação dos dados
-    # --------------------------------------------------------
-
     (
         X_train,
         X_test,
@@ -320,74 +298,39 @@ def main() -> None:
         "Dados preparados para os experimentos."
     )
 
-    # --------------------------------------------------------
-    # Experimentos
-    # --------------------------------------------------------
-
+    # Execução de todos os 3 experimentos para a tabela comparativa
     experiments = [
+        "logistic_balanced",
         "random_forest_balanced",
+        "xgboost",  # ou "hist_gradient_boosting"
     ]
 
     results = []
 
     for model_name in experiments:
 
-        log.info(
-            "========================================"
-        )
-
-        log.info(
-            "EXPERIMENTO: %s",
-            model_name,
-        )
-
-        log.info(
-            "========================================"
-        )
+        log.info("========================================")
+        log.info("EXPERIMENTO: %s", model_name)
+        log.info("========================================")
 
         # Criar modelo
-        model = build_model(
-            model_name
-        )
+        model = build_model(model_name)
 
         # Treinar
-        model = train_model(
-            model,
-            X_train,
-            y_train,
-        )
+        model = train_model(model, X_train, y_train)
 
         # Avaliar
-        metrics = evaluate_model(
-            model,
-            model_name,
-            X_test,
-            y_test,
-        )
+        metrics = evaluate_model(model, model_name, X_test, y_test)
 
         # Salvar modelo
-        save_model(
-            model,
-            model_name,
-            preprocessor,
-            metrics,
-        )
+        save_model(model, model_name, preprocessor, metrics)
 
-        results.append(
-            metrics
-        )
+        results.append(metrics)
 
-    # --------------------------------------------------------
-    # Salvar resultados
-    # --------------------------------------------------------
+    # Salvar e exibir a tabela comparativa final
+    save_results(results)
 
-    save_results(
-        results
-    )
-
-    log.info(
-        "Pipeline de treinamento concluída."
-    )
+    log.info("Pipeline de treinamento concluída.")
 
 
 if __name__ == "__main__":

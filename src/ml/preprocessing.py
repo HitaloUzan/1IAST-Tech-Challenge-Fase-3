@@ -1,8 +1,10 @@
 import logging
+from typing import Tuple
 
 import google.auth
 from google.cloud import bigquery
 import pandas as pd
+from imblearn.under_sampling import RandomUnderSampler
 
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -12,37 +14,31 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 import config
 
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
-
 log = logging.getLogger(__name__)
 
-
 # ============================================================
-# CONFIGURAÇÃO DAS FEATURES
+# CONFIGURAÇÃO OFICIAL DAS FEATURES DA CAMADA GOLD
 # ============================================================
 
-TARGET_COLUMN = config.TARGET_COLUMN
+TARGET_COLUMN = getattr(config, "TARGET_COLUMN", "alfabetizado")
 
 NUMERIC_FEATURES = [
-    "ano",
-    "meta_alfabetizacao_2030",
-    "percentual_participacao",
-    "nivel_alfabetizacao",
+    "taxa_alfabetizacao_municipio",
+    "media_portugues_municipio",
+    "proporcao_abaixo_basico",
+    "proporcao_basico",
+    "proporcao_adequado_avancado",
+    "inse_municipio",
     "peso_aluno",
 ]
 
 CATEGORICAL_FEATURES = [
-    "serie",
     "rede",
-    "presenca",
-    "preenchimento_caderno",
-    "possui_meta_municipal",
 ]
-
 
 # ============================================================
 # CARREGAMENTO DOS DADOS
@@ -50,67 +46,49 @@ CATEGORICAL_FEATURES = [
 
 def load_data(client: bigquery.Client) -> pd.DataFrame:
     """
-    Carrega os dados da tabela Gold ML no BigQuery.
-
-    A rede privada é excluída devido à baixa representatividade
-    no conjunto de dados.
+    Carrega os dados corretos da camada Gold ML no BigQuery.
     """
-
     query = f"""
         SELECT
-            ano,
-            serie,
-            rede,
-            presenca,
+            taxa_alfabetizacao_municipio,
+            media_portugues_municipio,
+            proporcao_abaixo_basico,
+            proporcao_basico,
+            proporcao_adequado_avancado,
+            inse_municipio,
             peso_aluno,
-            preenchimento_caderno,
-            meta_alfabetizacao_2030,
-            percentual_participacao,
-            nivel_alfabetizacao,
-            possui_meta_municipal,
+            rede,
             alfabetizado
         FROM `{config.GCP_PROJECT_ID}.{config.BQ_DATASET_GOLD}.{config.ML_FEATURES_TABLE}`
         WHERE rede IN ('Municipal', 'Estadual')
     """
 
-    log.info("Carregando dados da Gold ML...")
-
+    log.info("Carregando dados da Gold ML no BigQuery...")
     df = client.query(query).to_dataframe()
-
-    log.info(
-        "Dados carregados: %s registros",
-        f"{len(df):,}"
-    )
-
+    log.info("Dados carregados com sucesso: %s registros", f"{len(df):,}")
     return df
 
-
 # ============================================================
-# SEPARAÇÃO ENTRE FEATURES E TARGET
+# SEPARAÇÃO BETWEEN FEATURES E TARGET
 # ============================================================
 
-def split_features_target(
-    df: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.Series]:
+def split_features_target(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
     """
-    Separa as variáveis preditoras (X) da variável alvo (y).
+    Separa as variáveis preditoras (X) do target (y) e realiza o mapeamento binário.
     """
-
     X = df.drop(columns=[TARGET_COLUMN])
-
+    
+    # Mapeamento dinâmico para garantir 0 e 1
     y = df[TARGET_COLUMN].map({
-        "Não": 0,
-        "Sim": 1,
+        "Não": 0, "Sim": 1,
+        "0": 0, "1": 1,
+        0: 0, 1: 1
     })
 
     if y.isna().any():
-        raise ValueError(
-            "A variável target possui valores diferentes de "
-            "'Sim' e 'Não'."
-        )
+        raise ValueError("A variável target possui valores nulos ou mapeamentos não reconhecidos.")
 
     return X, y
-
 
 # ============================================================
 # CONSTRUÇÃO DO PREPROCESSOR
@@ -118,144 +96,75 @@ def split_features_target(
 
 def build_preprocessor() -> ColumnTransformer:
     """
-    Cria o pipeline de transformação das features.
-
-    Features numéricas:
-        - imputação pela mediana
-        - padronização
-
-    Features categóricas:
-        - imputação pela categoria mais frequente
-        - One-Hot Encoding
+    Cria os pipelines de transformação (Imputer + Scaler / OneHot) para as colunas.
     """
-
     numeric_pipeline = Pipeline(
         steps=[
-            (
-                "imputer",
-                SimpleImputer(strategy="median"),
-            ),
-            (
-                "scaler",
-                StandardScaler(),
-            ),
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
         ]
     )
 
     categorical_pipeline = Pipeline(
         steps=[
-            (
-                "imputer",
-                SimpleImputer(strategy="most_frequent"),
-            ),
-            (
-                "onehot",
-                OneHotEncoder(
-                    handle_unknown="ignore",
-                    sparse_output=True,
-                ),
-            ),
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
         ]
     )
 
     preprocessor = ColumnTransformer(
         transformers=[
-            (
-                "numeric",
-                numeric_pipeline,
-                NUMERIC_FEATURES,
-            ),
-            (
-                "categorical",
-                categorical_pipeline,
-                CATEGORICAL_FEATURES,
-            ),
+            ("numeric", numeric_pipeline, NUMERIC_FEATURES),
+            ("categorical", categorical_pipeline, CATEGORICAL_FEATURES),
         ]
     )
 
     return preprocessor
 
-
 # ============================================================
-# PREPARAÇÃO DOS DADOS
+# PREPARAÇÃO E DIVISION DOS DADOS
 # ============================================================
 
-def prepare_data(client: bigquery.Client):
+def prepare_data(client: bigquery.Client, apply_undersampling: bool = True):
     """
-    Executa o pipeline completo de preparação dos dados.
-
-    Fluxo:
-
-        Gold ML
-            ↓
-        separação X/y
-            ↓
-        train/test split 80/20
-            ↓
-        fit do preprocessing no treino
-            ↓
-        transformação do treino e teste
+    Executa a pipeline de extração, split treino/teste (80/20) e pré-processamento.
+    Aplica RandomUnderSampler estritamente no treino para balancear em 50/50.
     """
-
     df = load_data(client)
-
     X, y = split_features_target(df)
 
     log.info(
-        "Distribuição do target:"
-        " 0=%s | 1=%s",
+        "Distribuição inicial do Target: 0=%s | 1=%s",
         f"{(y == 0).sum():,}",
         f"{(y == 1).sum():,}",
     )
 
-    # --------------------------------------------------------
-    # Separação treino / teste
-    # --------------------------------------------------------
-
+    # Split Estratificado 80/20
     X_train, X_test, y_train, y_test = train_test_split(
         X,
         y,
-        test_size=config.TEST_SIZE,
-        random_state=config.RANDOM_STATE,
+        test_size=getattr(config, "TEST_SIZE", 0.20),
+        random_state=getattr(config, "RANDOM_STATE", 42),
         stratify=y,
     )
 
     log.info(
-        "Treino: %s registros | Teste: %s registros",
+        "Divisão realizada -> Treino: %s | Teste: %s",
         f"{len(X_train):,}",
         f"{len(X_test):,}",
     )
 
-    # --------------------------------------------------------
-    # Preprocessing
-    # --------------------------------------------------------
-
     preprocessor = build_preprocessor()
 
-    # O fit acontece SOMENTE no conjunto de treino.
-    # Isso evita data leakage.
-
+    # Fit SOMENTE no conjunto de treino (evita data leakage)
     X_train_processed = preprocessor.fit_transform(X_train)
-
-    # No teste apenas aplicamos as transformações
-    # aprendidas no treinamento.
-
     X_test_processed = preprocessor.transform(X_test)
 
-    log.info(
-        "Features após preprocessing: %s",
-        X_train_processed.shape[1],
-    )
-
-    log.info(
-        "Shape treino: %s",
-        X_train_processed.shape,
-    )
-
-    log.info(
-        "Shape teste: %s",
-        X_test_processed.shape,
-    )
+    # Balanceamento 50/50 restrito ao Treino
+    if apply_undersampling:
+        rus = RandomUnderSampler(random_state=getattr(config, "RANDOM_STATE", 42))
+        X_train_processed, y_train = rus.fit_resample(X_train_processed, y_train)
+        log.info("Balanceamento (50/50) via RandomUnderSampler aplicado com sucesso na base de treino.")
 
     return (
         X_train_processed,
@@ -265,25 +174,10 @@ def prepare_data(client: bigquery.Client):
         preprocessor,
     )
 
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main() -> None:
-    """
-    Executa o pipeline de preprocessing.
-    """
-
+if __name__ == "__main__":
     credentials, _ = google.auth.default()
-
     client = bigquery.Client(
         project=config.GCP_PROJECT_ID,
         credentials=credentials,
     )
-
     prepare_data(client)
-
-
-if __name__ == "__main__":
-    main()
