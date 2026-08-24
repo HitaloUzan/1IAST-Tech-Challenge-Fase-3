@@ -27,9 +27,12 @@ NUMERIC_FEATURES = [
     "proporcao_adequado_avancado",
     "inse_municipio",
     "peso_aluno",
+    "taxa_alfabetizacao_escola_prior",
+    "n_alunos_prior_escola",
+    "tem_historico_escola",
 ]
 
-CATEGORICAL_FEATURES = ["rede"]
+CATEGORICAL_FEATURES = ["rede", "sigla_uf_code"]
 
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
@@ -49,7 +52,11 @@ def load_data(client: bigquery.Client) -> pd.DataFrame:
             proporcao_adequado_avancado,
             inse_municipio,
             peso_aluno,
+            taxa_alfabetizacao_escola_prior,
+            n_alunos_prior_escola,
+            tem_historico_escola,
             rede,
+            sigla_uf_code,
             {TARGET_COLUMN}
         FROM `{config.GCP_PROJECT_ID}.{config.BQ_DATASET_GOLD}.{config.ML_FEATURES_TABLE}`
         WHERE rede IN ('Municipal', 'Estadual')
@@ -90,12 +97,18 @@ def build_preprocessor() -> ColumnTransformer:
     ])
 
 
-def build_full_pipeline(model, apply_undersampling: bool = True) -> ImbPipeline:
+def build_full_pipeline(model, apply_undersampling: bool = False) -> ImbPipeline:
     """
     Um unico objeto sklearn/imblearn Pipeline com pre-processamento +
     balanceamento + estimador -- atende a exigencia do PDF de "integracao
     do pre-processamento diretamente ao modelo" (na v1 do repo, o
     ColumnTransformer era ajustado fora do Pipeline do modelo).
+
+    apply_undersampling=False por padrao: o desbalanceamento (~59%/41%) e
+    tratado via class_weight="balanced" (Logistic/RandomForest) ou
+    scale_pos_weight (XGBoost) no proprio modelo, sem descartar ~600k
+    linhas da classe majoritaria por fold como o RandomUnderSampler da v1
+    fazia.
     """
     steps = [("preprocessor", build_preprocessor())]
     if apply_undersampling:

@@ -46,7 +46,13 @@ def load_best_params() -> dict:
     return {}
 
 
-def build_model(model_name: str, params: dict):
+def _scale_pos_weight(y) -> float:
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    return n_neg / n_pos if n_pos else 1.0
+
+
+def build_model(model_name: str, params: dict, y_train=None):
     if model_name == "logistic":
         return LogisticRegression(
             max_iter=1000, class_weight="balanced",
@@ -58,6 +64,7 @@ def build_model(model_name: str, params: dict):
         )
     if model_name == "xgboost":
         return XGBClassifier(
+            scale_pos_weight=_scale_pos_weight(y_train) if y_train is not None else 1.0,
             random_state=config.RANDOM_STATE, n_jobs=-1,
             tree_method="hist", eval_metric="auc", **params,
         )
@@ -103,10 +110,11 @@ def main() -> None:
         params = best.get(model_name, {}).get("best_params", DEFAULT_PARAMS[model_name])
         log.info("Treinando %s com params: %s", model_name, params)
 
-        model = build_model(model_name, params)
-        # Pipeline unico (preprocessor + undersampler + modelo) -- e o
-        # artefato salvo, nao mais modelo/preprocessor separados.
-        pipeline = build_full_pipeline(model, apply_undersampling=True)
+        model = build_model(model_name, params, y_train=y_train)
+        # Pipeline unico (preprocessor + modelo) -- e o artefato salvo,
+        # nao mais modelo/preprocessor separados. Balanceamento via
+        # class_weight/scale_pos_weight, sem descartar dados (ver preprocessing.py).
+        pipeline = build_full_pipeline(model, apply_undersampling=False)
         pipeline.fit(X_train, y_train)
 
         metrics = evaluate_model(pipeline, model_name, X_test, y_test)

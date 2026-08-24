@@ -23,7 +23,14 @@ REPORTS_DIR = Path("reports")
 MODEL_NAMES = ["logistic", "random_forest", "xgboost"]
 
 
-def _build_model(model_name, trial):
+def _scale_pos_weight(y) -> float:
+    """XGBoost nao tem class_weight -- scale_pos_weight = neg/pos e o equivalente."""
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    return n_neg / n_pos if n_pos else 1.0
+
+
+def _build_model(model_name, trial, y=None):
     if model_name == "logistic":
         return LogisticRegression(
             C=trial.suggest_float("C", 1e-3, 1e2, log=True),
@@ -50,6 +57,7 @@ def _build_model(model_name, trial):
             colsample_bytree=trial.suggest_float("colsample_bytree", 0.5, 1.0),
             min_child_weight=trial.suggest_int("min_child_weight", 1, 10),
             reg_lambda=trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+            scale_pos_weight=_scale_pos_weight(y) if y is not None else 1.0,
             random_state=config.RANDOM_STATE,
             n_jobs=-1,
             tree_method="hist",
@@ -67,7 +75,7 @@ def _cv_score(model, X, y, groups, n_splits, trial):
     cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=config.RANDOM_STATE)
     scores = []
     for fold, (tr_idx, va_idx) in enumerate(cv.split(X, y, groups=groups)):
-        pipe = build_full_pipeline(model, apply_undersampling=True)
+        pipe = build_full_pipeline(model, apply_undersampling=False)
         pipe.fit(X.iloc[tr_idx], y.iloc[tr_idx])
         proba = pipe.predict_proba(X.iloc[va_idx])[:, 1]
         scores.append(roc_auc_score(y.iloc[va_idx], proba))
@@ -81,7 +89,7 @@ def _cv_score(model, X, y, groups, n_splits, trial):
 
 def make_objective(model_name, X, y, groups, n_splits):
     def objective(trial):
-        model = _build_model(model_name, trial)
+        model = _build_model(model_name, trial, y=y)
         return _cv_score(model, X, y, groups, n_splits, trial)
 
     return objective

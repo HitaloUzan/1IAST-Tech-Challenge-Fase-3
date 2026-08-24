@@ -10,8 +10,12 @@ Este repositorio e um fork de [NaiaraMartins/1IAST-Tech-Challenge-Fase-3](https:
 
 - Otimizacao de hiperparametros com Optuna (ausente na v1 -- os 3 modelos usavam parametros fixos).
 - Split e cross-validation agrupados por id_aluno em vez de linha aleatoria -- ver secao 4.
-- Pipeline sklearn unico (preprocessor + undersampler + modelo em um so objeto), em vez de preprocessor e modelo salvos separados.
-- Uma tabela Gold propria, gold.ml_features_alunos_v2 (mesma logica de join da v1, com id_aluno preservado), para nao sobrescrever a tabela original no mesmo projeto GCP compartilhado.
+- Pipeline sklearn unico (preprocessor + modelo em um so objeto), em vez de preprocessor e modelo salvos separados.
+- Correcao de um vazamento temporal: a v1 calculava a taxa de alfabetizacao do municipio misturando 2023+2024 (media unica) para toda linha, entao uma linha de 2023 recebia informacao de 2024, que ainda nao existia. Corrigido para casar pelo mesmo ano da linha.
+- Feature nova no grao de escola (mais fino que municipio): taxa de alfabetizacao da propria escola no ano anterior, calculada a partir de alunos_clean, sem risco de vazamento (nunca usa o mesmo ano/mesma turma).
+- Feature nova: codigo de UF (2 primeiros digitos do id_municipio).
+- Troca de RandomUnderSampler por class_weight/scale_pos_weight -- a v1 descartava boa parte da classe majoritaria a cada fold; aqui o balanceamento e feito sem jogar dado fora.
+- Uma tabela Gold propria, gold.ml_features_alunos_v2, para nao sobrescrever a tabela original no mesmo projeto GCP compartilhado.
 
 ## 3. Estrutura do Projeto
 
@@ -40,8 +44,10 @@ src/
 
 - Filtro de escopo: apenas redes publicas (Municipal e Estadual), como na v1.
 - proficiencia (nota SAEB) excluida das features: e a mesma variavel que define o rotulo alfabetizado (corte oficial de 743 pontos), confirmado via query direta no BigQuery -- alfabetizado = 'Sim' equivale a proficiencia >= 743 de forma exata nos dados.
-- Split e CV agrupados por id_aluno (GroupShuffleSplit / StratifiedGroupKFold): descobrimos, consultando gold.ml_features_alunos_v2, que 51,2% dos alunos aparecem em 2 linhas (edicoes 2023 e 2024). Um train_test_split aleatorio por linha -- usado na v1 -- deixa o mesmo aluno em treino e teste ao mesmo tempo. Corrigido aqui: nenhum aluno do treino aparece no teste (verificado programaticamente a cada execucao de prepare_data()).
-- Isolamento dos transformadores: SimpleImputer/StandardScaler/OneHotEncoder e RandomUnderSampler vivem dentro do mesmo Pipeline do modelo, com fit restrito a cada fold/treino -- nunca veem o conjunto de teste.
+- Split e CV agrupados por id_aluno (GroupShuffleSplit / StratifiedGroupKFold): descobrimos, consultando a gold, que 51,2% dos alunos aparecem em 2 linhas (edicoes 2023 e 2024). Um train_test_split aleatorio por linha -- usado na v1 -- deixa o mesmo aluno em treino e teste ao mesmo tempo. Corrigido aqui: nenhum aluno do treino aparece no teste (verificado programaticamente a cada execucao de prepare_data()).
+- Taxa/media/proporcoes do municipio casadas pelo MESMO ano da linha (nao mais uma media borrada entre 2023 e 2024 -- ver secao 2).
+- Taxa de alfabetizacao da escola usa APENAS o ano anterior (ano-1): nunca inclui o proprio aluno nem sua turma. Cobertura: ~79% das linhas de 2024 tem historico de 2023; linhas de 2023 ficam sem essa feature (nao ha 2022 nos dados) -- sinalizado pela flag tem_historico_escola em vez de fabricar um valor.
+- Isolamento dos transformadores: SimpleImputer/StandardScaler/OneHotEncoder vivem dentro do mesmo Pipeline do modelo, com fit restrito a cada fold/treino -- nunca veem o conjunto de teste.
 
 ## 5. Otimizacao de Hiperparametros (Optuna)
 
@@ -51,29 +57,29 @@ A busca roda em uma subamostra de 150.000 linhas (em vez dos ~2,68M de treino): 
 
 | Modelo | ROC-AUC (CV, subamostra) | Melhores parametros |
 |---|---|---|
-| Logistic | 0.6701 | C=13.20 |
-| Random Forest | 0.6732 | n_estimators=299, max_depth=9, min_samples_leaf=6, max_features=sqrt |
-| XGBoost | 0.6737 | n_estimators=489, max_depth=6, learning_rate=0.0101, subsample=0.79, colsample_bytree=0.77, min_child_weight=4, reg_lambda=2.55 |
+| Logistic | 0.6819 | C=0.0060 |
+| Random Forest | 0.6840 | n_estimators=176, max_depth=11, min_samples_leaf=4, max_features=sqrt |
+| XGBoost | 0.6843 | n_estimators=489, max_depth=6, learning_rate=0.0101, subsample=0.79, colsample_bytree=0.77, min_child_weight=4, reg_lambda=2.55 |
 
 ## 6. Resultados Finais (teste agrupado por aluno, ~670.817 registros)
 
 | Modelo | Accuracy | F1-Macro | Recall (Nao Alfab.) | Recall (Alfabetizado) | ROC-AUC |
 |---|---|---|---|---|---|
-| Logistic | 61,81% | 0.6138 | 62,75% | 61,16% | 0.6712 |
-| Random Forest (campeao) | 62,17% | 0.6181 | 64,21% | 60,76% | 0.6770 |
-| XGBoost | 62,13% | 0.6177 | 64,10% | 60,77% | 0.6767 |
+| Logistic | 62,63% | 0.6220 | 63,65% | 61,92% | 0.6820 |
+| Random Forest (campeao) | 62,68% | 0.6235 | 65,15% | 60,98% | 0.6866 |
+| XGBoost | 62,67% | 0.6235 | 65,41% | 60,77% | 0.6860 |
 
-O Random Forest venceu por margem minima sobre o XGBoost (+0,0003 ROC-AUC) -- estatisticamente, os tres modelos convergem para o mesmo teto de sinal disponivel nos dados (ver secao 9).
+Random Forest venceu por margem minima sobre o XGBoost (+0,0006 ROC-AUC) -- de novo, os tres modelos convergem para o mesmo teto de sinal disponivel (ver secao 9).
 
-### Comparacao metodologica com a v1 (Naiara)
+### Evolucao do pipeline (3 versoes, mesmo teste agrupado por aluno)
 
-| Modelo | ROC-AUC v1 (split por linha) | ROC-AUC aqui (split por aluno) | Diferenca |
-|---|---|---|---|
-| Logistic | 0.6723 | 0.6712 | -0.0011 |
-| Random Forest | 0.6834 | 0.6770 | -0.0064 |
-| XGBoost | 0.6833 | 0.6767 | -0.0066 |
+| Modelo | v1 Naiara (split por linha, sem tuning) | Fork -- so leakage fix (Optuna + split por aluno) | Fork -- + features de escola/UF/ano | Ganho total |
+|---|---|---|---|---|
+| Logistic | 0.6723 | 0.6712 | 0.6820 | +0.0097 |
+| Random Forest | 0.6834 | 0.6770 | 0.6866 | +0.0032 |
+| XGBoost | 0.6833 | 0.6767 | 0.6860 | +0.0027 |
 
-A v1 tinha ROC-AUC mais alto -- mas isso e justamente o efeito esperado do vazamento descrito na secao 4: o split aleatorio por linha deixa o mesmo aluno (repetido em 2023/2024) influenciar treino e teste ao mesmo tempo, inflando a metrica de forma mais visivel nos modelos de arvore (mais flexiveis para explorar a quase-duplicata) do que na regressao logistica (mais regularizada). O numero mais baixo aqui e o mais confiavel para generalizacao real.
+A primeira correcao (split agrupado) reduziu o ROC-AUC porque removeu o vazamento entre treino/teste da v1 -- numero mais baixo, porem confiavel. A segunda rodada (features de escola/UF + fix do blend de anos) recuperou e superou o numero original da v1, desta vez sem vazamento. Accuracy tambem subiu de ~62,2% (fork inicial) para ~62,7%.
 
 ## 7. Interpretabilidade (Random Forest, modelo campeao)
 
@@ -81,21 +87,23 @@ A v1 tinha ROC-AUC mais alto -- mas isso e justamente o efeito esperado do vazam
 
 | Variavel | Contribuicao (%) |
 |---|---|
-| taxa_alfabetizacao_municipio | 38,08% |
-| media_portugues_municipio | 29,38% |
-| proporcao_adequado_avancado | 14,15% |
-| proporcao_basico | 8,21% |
-| proporcao_abaixo_basico | 4,13% |
-| peso_aluno | 2,97% |
-| inse_municipio | 1,55% |
-| rede_Estadual | 0,82% |
-| rede_Municipal | 0,71% |
+| taxa_alfabetizacao_municipio | 32,93% |
+| media_portugues_municipio | 28,12% |
+| proporcao_basico | 8,46% |
+| proporcao_adequado_avancado | 7,72% |
+| proporcao_abaixo_basico | 4,99% |
+| UF (Santa Catarina) | 4,25% |
+| inse_municipio | 2,86% |
+| peso_aluno | 2,52% |
+| UF (Bahia) | 2,47% |
+| taxa_alfabetizacao_escola_prior | 0,77% |
+| rede / n_alunos_prior_escola / tem_historico_escola / demais UFs | restante |
 
-O historico municipal de alfabetizacao (taxa_alfabetizacao_municipio + media_portugues_municipio, juntas ~67%) domina a predicao -- esperado, ja que sao as variaveis mais diretamente correlacionadas ao desfecho no nivel agregado disponivel.
+O historico municipal de alfabetizacao ainda domina (~61% somado), mas agora responde por uma fatia menor do total (era ~67% na v2 sem as novas features) -- UF e as proporcoes por nivel ganharam peso relativo. Curiosamente, a taxa historica da propria escola teve contribuicao individual pequena (0,77%) apesar de ter ajudado o ROC-AUC geral -- sinal de que o efeito dela e mais forte em interacao com outras variaveis do que isoladamente (algo que uma arvore de profundidade limitada nao captura bem sozinha).
 
 ### SHAP
 
-reports/images/shap_summary_random_forest.png (impacto direcional) e shap_waterfall_random_forest.png (explicacao individual) confirmam a mesma hierarquia: taxa e media municipais deslocam a probabilidade de alfabetizacao positivamente; INSE tem efeito na mesma direcao, porem secundario.
+reports/images/shap_summary_random_forest.png (impacto direcional) e shap_waterfall_random_forest.png (explicacao individual) confirmam a mesma hierarquia: taxa e media municipais deslocam a probabilidade de alfabetizacao positivamente; INSE e UF tem efeito secundario, porem visivel.
 
 ## 8. Aplicacao Estrategica: Threshold Tuning para Busca Ativa
 
@@ -103,17 +111,17 @@ Em politicas de Busca Ativa, o custo de um Falso Negativo (nao identificar uma c
 
 | Threshold | Accuracy | Recall (risco) | Precision (risco) |
 |---|---|---|---|
-| 0,50 (padrao) | 62,17% | 64,21% | 53,06% |
-| 0,55 | 59,38% | 75,68% | 50,19% |
-| 0,60 | 55,29% | 86,32% | 47,41% |
-| 0,65 | 51,75% | 92,52% | 45,54% |
+| 0,50 (padrao) | 62,68% | 65,15% | 53,56% |
+| 0,55 | 59,94% | 77,02% | 50,64% |
+| 0,60 | 55,81% | 87,31% | 47,76% |
+| 0,65 | 52,68% | 92,37% | 46,05% |
 
-Com threshold 0,55 (mesma regra de negocio adotada na v1), o recall de alunos em risco sobe de 64,2% para 75,7% -- um ganho de ~11,5pp de cobertura, ao custo de mais falsos positivos (triagem mais ampla, adequada quando o custo de reforco extra e menor que o de nao intervir).
+Com threshold 0,55 (mesma regra de negocio adotada na v1), o recall de alunos em risco sobe de 65,2% para 77,0% -- um ganho de ~11,9pp de cobertura, ao custo de mais falsos positivos.
 
 ## 9. Limitacoes Reais e Eticas
 
-1. Grao dos dados: a base publica do INEP (Base dos Dados) so libera microdado individual (id_aluno) sem variaveis socioeconomicas no mesmo grao -- o contexto territorial/socioeconomico (inse_municipio, taxas municipais) e agregado por municipio. Isso impoe um teto de sinal: ROC-AUC ~0,67-0,68 e accuracy ~62% sao consistentes nos tres modelos e nas duas versoes do pipeline, sugerindo que o limite e do dado disponivel, nao do modelo ou do tuning.
-2. Correlacao ecologica: usar taxas municipais como preditor de um desfecho individual carrega o risco classico de inferencia ecologica -- o modelo aprende "o municipio deste aluno historicamente vai bem/mal", nao necessariamente fatores causais sobre o aluno especifico.
+1. Grao dos dados: mesmo apos adicionar historico de escola e UF, a maior parte do sinal ainda vem de agregados territoriais (municipio) -- tentamos ligar INSE no grao de escola diretamente, mas o id_escola de silver.inse_escola_clean nao compartilha o mesmo namespace de codigo do id_escola em silver.alunos_clean (0 de 42.802 escolas batem apos normalizar), entao esse enriquecimento ficou fora de alcance com os dados atuais. O teto de sinal (ROC-AUC ~0,68-0,69, accuracy ~62-63%) e consistente nas 3 versoes do pipeline, sugerindo que o limite e estrutural, nao de modelo ou tuning.
+2. Correlacao ecologica: usar taxas municipais como preditor de um desfecho individual carrega o risco classico de inferencia ecologica.
 3. Uso exclusivo para suporte: o modelo deve ser usado para alerta precoce e triagem distributiva de recursos, nunca para fins punitivos ou discriminatorios.
 
 ## 10. Aplicacao Pratica para Politicas Publicas
@@ -122,10 +130,11 @@ O modelo, com o threshold ajustado (0,55-0,60), pode alimentar paineis de Busca 
 
 ## 11. Possiveis Evolucoes Futuras
 
-- Enriquecer com fontes externas no grao municipio (Censo Escolar, PNAD, Atlas do Desenvolvimento Humano) para reduzir a limitacao da secao 9.2.
+- Resolver a divergencia de codigo de escola entre silver.alunos_clean e silver.inse_escola_clean (provavelmente exige uma tabela de-para externa, ex. Censo Escolar/INEP) para habilitar INSE no grao de escola.
+- Enriquecer com fontes externas no grao municipio (Censo Escolar, PNAD, Atlas do Desenvolvimento Humano).
 - Rodar a busca Optuna na base de treino completa (nao a subamostra) em ambiente com mais capacidade computacional, e aumentar OPTUNA_N_TRIALS.
 - Testar StratifiedGroupKFold por id_escola (alem de id_aluno) para avaliar generalizacao entre escolas nao vistas.
-- Modelo de serie temporal (2023 -> 2024) para prever evolucao ano a ano por municipio.
+- Modelo de serie temporal (2023 -> 2024) para prever evolucao ano a ano por municipio, agora que ja existe a infraestrutura de features "ano-1".
 
 ## 12. Como Executar
 

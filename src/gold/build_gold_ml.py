@@ -22,12 +22,31 @@ CLUSTER_FIELDS = {
 
 # Query herdada de NaiaraMartins/1IAST-Tech-Challenge-Fase-3 (src/gold/build_gold_ml.py),
 # com id_aluno preservado para permitir split/CV agrupado por aluno (evita o mesmo
-# aluno aparecer em treino e teste quando ele tem mais de um caderno na mesma edicao).
+# aluno aparecer em treino e teste quando ele tem mais de um caderno na mesma edicao),
+# mais 3 melhorias sobre a v2:
+#
+# 1. municipio_same_year: a v2 fazia AVG(taxa_alfabetizacao) misturando 2023+2024
+#    pra toda linha (sem filtrar por ano) -- ou seja, uma linha de 2023 recebia
+#    informacao de 2024 (que ainda nao existia). Corrigido para casar pelo MESMO
+#    ano da linha.
+# 2. escola_prior_year: feature nova, no grao de ESCOLA (mais fino que municipio),
+#    calculada a partir do proprio alunos_clean agregado por id_escola+ano e casada
+#    com ano_alvo = ano+1 -- ou seja, so usa o desempenho da escola no ano ANTERIOR
+#    (nunca o mesmo ano/mesma turma), sem risco de vazamento. Cobertura: ~79% das
+#    linhas de 2024 tem historico de 2023; linhas de 2023 ficam NULL (nao ha 2022
+#    nos dados) -- sinalizado explicitamente por tem_historico_escola.
+#    (Tentamos ligar INSE por escola tambem, mas id_escola em inse_escola_clean
+#    e silver.alunos_clean nao compartilham o mesmo namespace de codigo -- 0 de
+#    42.802 escolas batem mesmo apos normalizar o tipo. Confirmado por query
+#    direta antes de descartar a ideia.)
+# 3. sigla_uf_code: os 2 primeiros digitos do id_municipio (codigo IBGE) --
+#    variavel territorial adicional, praticamente gratuita.
 ML_GOLD_TABLES = {
     ML_FEATURES_TABLE: f"""
-        WITH municipio_2serie AS (
+        WITH municipio_same_year AS (
             SELECT
                 SUBSTR(CAST(id_municipio AS STRING), 1, 6) AS id_municipio_6dig,
+                CAST(ano AS INT64) AS ano,
                 AVG(SAFE_CAST(REPLACE(CAST(taxa_alfabetizacao AS STRING), ',', '.') AS FLOAT64)) AS taxa_alfabetizacao_municipio,
                 AVG(SAFE_CAST(REPLACE(CAST(media_portugues AS STRING), ',', '.') AS FLOAT64)) AS media_portugues_municipio,
                 AVG(SAFE_CAST(REPLACE(CAST(proporcao_abaixo_basico AS STRING), ',', '.') AS FLOAT64)) AS proporcao_abaixo_basico,
@@ -35,7 +54,17 @@ ML_GOLD_TABLES = {
                 AVG(SAFE_CAST(REPLACE(CAST(proporcao_adequado_avancado AS STRING), ',', '.') AS FLOAT64)) AS proporcao_adequado_avancado
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET_SILVER}.alfabetizacao_municipio_clean`
             WHERE TRIM(serie) = '2° ano do Ensino Fundamental'
-            GROUP BY 1
+            GROUP BY 1, 2
+        ),
+        escola_prior_year AS (
+            SELECT
+                TRIM(CAST(SAFE_CAST(id_escola AS INT64) AS STRING)) AS id_escola,
+                CAST(ano AS INT64) + 1 AS ano_alvo,
+                AVG(CASE WHEN alfabetizado = 'Sim' THEN 1.0 ELSE 0.0 END) AS taxa_alfabetizacao_escola_prior,
+                COUNT(*) AS n_alunos_prior_escola
+            FROM `{GCP_PROJECT_ID}.{BQ_DATASET_SILVER}.alunos_clean`
+            WHERE presenca = 'Presente'
+            GROUP BY 1, 2
         ),
         inse_municipio_agregado AS (
             SELECT
@@ -49,6 +78,7 @@ ML_GOLD_TABLES = {
             CAST(a.ano AS INT64) AS ano,
             a.id_aluno,
             SUBSTR(CAST(a.id_municipio AS STRING), 1, 6) AS id_municipio,
+            SUBSTR(CAST(a.id_municipio AS STRING), 1, 2) AS sigla_uf_code,
             TRIM(CAST(SAFE_CAST(a.id_escola AS INT64) AS STRING)) AS id_escola,
             TRIM(a.rede) AS rede,
             a.presenca,
@@ -61,15 +91,24 @@ ML_GOLD_TABLES = {
             m.media_portugues_municipio,
             m.proporcao_abaixo_basico,
             m.proporcao_basico,
-            m.proporcao_adequado_avancado
+            m.proporcao_adequado_avancado,
+
+            e.taxa_alfabetizacao_escola_prior,
+            e.n_alunos_prior_escola,
+            CASE WHEN e.id_escola IS NOT NULL THEN 1 ELSE 0 END AS tem_historico_escola
 
         FROM `{GCP_PROJECT_ID}.{BQ_DATASET_SILVER}.alunos_clean` a
 
         LEFT JOIN inse_municipio_agregado i
             ON SUBSTR(CAST(a.id_municipio AS STRING), 1, 6) = i.id_municipio_6dig
 
-        LEFT JOIN municipio_2serie m
+        LEFT JOIN municipio_same_year m
             ON SUBSTR(CAST(a.id_municipio AS STRING), 1, 6) = m.id_municipio_6dig
+            AND CAST(a.ano AS INT64) = m.ano
+
+        LEFT JOIN escola_prior_year e
+            ON TRIM(CAST(SAFE_CAST(a.id_escola AS INT64) AS STRING)) = e.id_escola
+            AND CAST(a.ano AS INT64) = e.ano_alvo
 
         WHERE a.id_municipio IS NOT NULL
           AND a.id_aluno IS NOT NULL

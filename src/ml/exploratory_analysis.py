@@ -22,6 +22,9 @@ NUMERIC_FEATURES = [
     "proporcao_adequado_avancado",
     "inse_municipio",
     "peso_aluno",
+    "taxa_alfabetizacao_escola_prior",
+    "n_alunos_prior_escola",
+    "tem_historico_escola",
 ]
 
 
@@ -35,7 +38,11 @@ def load_gold_data(client: bigquery.Client) -> pd.DataFrame:
             proporcao_adequado_avancado,
             inse_municipio,
             peso_aluno,
+            taxa_alfabetizacao_escola_prior,
+            n_alunos_prior_escola,
+            tem_historico_escola,
             rede,
+            sigla_uf_code,
             alfabetizado
         FROM `{config.GCP_PROJECT_ID}.{config.BQ_DATASET_GOLD}.{config.ML_FEATURES_TABLE}`
         WHERE rede IN ('Municipal', 'Estadual')
