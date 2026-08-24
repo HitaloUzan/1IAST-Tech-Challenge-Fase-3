@@ -1,30 +1,23 @@
 import logging
 from typing import Tuple
 
-import google.auth
-from google.cloud import bigquery
 import pandas as pd
+from google.cloud import bigquery
+from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.under_sampling import RandomUnderSampler
-
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 import config
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# ============================================================
-# CONFIGURAÇÃO OFICIAL DAS FEATURES DA CAMADA GOLD
-# ============================================================
-
-TARGET_COLUMN = getattr(config, "TARGET_COLUMN", "alfabetizado")
+TARGET_COLUMN = config.TARGET_COLUMN
+GROUP_COLUMN = config.GROUP_COLUMN
 
 NUMERIC_FEATURES = [
     "taxa_alfabetizacao_municipio",
@@ -36,20 +29,19 @@ NUMERIC_FEATURES = [
     "peso_aluno",
 ]
 
-CATEGORICAL_FEATURES = [
-    "rede",
-]
+CATEGORICAL_FEATURES = ["rede"]
 
-# ============================================================
-# CARREGAMENTO DOS DADOS
-# ============================================================
+FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+
 
 def load_data(client: bigquery.Client) -> pd.DataFrame:
     """
-    Carrega os dados corretos da camada Gold ML no BigQuery.
+    Carrega gold.ml_features_alunos_v2 (mesma logica de join de
+    NaiaraMartins/1IAST-Tech-Challenge-Fase-3, com id_aluno preservado).
     """
     query = f"""
         SELECT
+            {GROUP_COLUMN},
             taxa_alfabetizacao_municipio,
             media_portugues_municipio,
             proporcao_abaixo_basico,
@@ -58,126 +50,96 @@ def load_data(client: bigquery.Client) -> pd.DataFrame:
             inse_municipio,
             peso_aluno,
             rede,
-            alfabetizado
+            {TARGET_COLUMN}
         FROM `{config.GCP_PROJECT_ID}.{config.BQ_DATASET_GOLD}.{config.ML_FEATURES_TABLE}`
         WHERE rede IN ('Municipal', 'Estadual')
     """
-
     log.info("Carregando dados da Gold ML no BigQuery...")
     df = client.query(query).to_dataframe()
-    log.info("Dados carregados com sucesso: %s registros", f"{len(df):,}")
+    log.info("Dados carregados: %s registros", f"{len(df):,}")
     return df
 
-# ============================================================
-# SEPARAÇÃO BETWEEN FEATURES E TARGET
-# ============================================================
 
-def split_features_target(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+def split_features_target(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
     """
-    Separa as variáveis preditoras (X) do target (y) e realiza o mapeamento binário.
+    Separa features (X), target binario (y) e grupo (id_aluno, usado so
+    para split/CV -- nunca entra como feature do modelo).
     """
-    X = df.drop(columns=[TARGET_COLUMN])
-    
-    # Mapeamento dinâmico para garantir 0 e 1
-    y = df[TARGET_COLUMN].map({
-        "Não": 0, "Sim": 1,
-        "0": 0, "1": 1,
-        0: 0, 1: 1
-    })
+    groups = df[GROUP_COLUMN]
+    X = df[FEATURE_COLUMNS]
 
+    y = df[TARGET_COLUMN].map({"Não": 0, "Nao": 0, "Sim": 1, "0": 0, "1": 1, 0: 0, 1: 1})
     if y.isna().any():
-        raise ValueError("A variável target possui valores nulos ou mapeamentos não reconhecidos.")
+        raise ValueError("A variavel target possui valores nulos ou mapeamentos nao reconhecidos.")
 
-    return X, y
+    return X, y, groups
 
-# ============================================================
-# CONSTRUÇÃO DO PREPROCESSOR
-# ============================================================
 
 def build_preprocessor() -> ColumnTransformer:
+    numeric_pipeline = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+    ])
+    categorical_pipeline = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+    ])
+    return ColumnTransformer(transformers=[
+        ("numeric", numeric_pipeline, NUMERIC_FEATURES),
+        ("categorical", categorical_pipeline, CATEGORICAL_FEATURES),
+    ])
+
+
+def build_full_pipeline(model, apply_undersampling: bool = True) -> ImbPipeline:
     """
-    Cria os pipelines de transformação (Imputer + Scaler / OneHot) para as colunas.
+    Um unico objeto sklearn/imblearn Pipeline com pre-processamento +
+    balanceamento + estimador -- atende a exigencia do PDF de "integracao
+    do pre-processamento diretamente ao modelo" (na v1 do repo, o
+    ColumnTransformer era ajustado fora do Pipeline do modelo).
     """
-    numeric_pipeline = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-        ]
-    )
-
-    categorical_pipeline = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
-        ]
-    )
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("numeric", numeric_pipeline, NUMERIC_FEATURES),
-            ("categorical", categorical_pipeline, CATEGORICAL_FEATURES),
-        ]
-    )
-
-    return preprocessor
-
-# ============================================================
-# PREPARAÇÃO E DIVISION DOS DADOS
-# ============================================================
-
-def prepare_data(client: bigquery.Client, apply_undersampling: bool = True):
-    """
-    Executa a pipeline de extração, split treino/teste (80/20) e pré-processamento.
-    Aplica RandomUnderSampler estritamente no treino para balancear em 50/50.
-    """
-    df = load_data(client)
-    X, y = split_features_target(df)
-
-    log.info(
-        "Distribuição inicial do Target: 0=%s | 1=%s",
-        f"{(y == 0).sum():,}",
-        f"{(y == 1).sum():,}",
-    )
-
-    # Split Estratificado 80/20
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=getattr(config, "TEST_SIZE", 0.20),
-        random_state=getattr(config, "RANDOM_STATE", 42),
-        stratify=y,
-    )
-
-    log.info(
-        "Divisão realizada -> Treino: %s | Teste: %s",
-        f"{len(X_train):,}",
-        f"{len(X_test):,}",
-    )
-
-    preprocessor = build_preprocessor()
-
-    # Fit SOMENTE no conjunto de treino (evita data leakage)
-    X_train_processed = preprocessor.fit_transform(X_train)
-    X_test_processed = preprocessor.transform(X_test)
-
-    # Balanceamento 50/50 restrito ao Treino
+    steps = [("preprocessor", build_preprocessor())]
     if apply_undersampling:
-        rus = RandomUnderSampler(random_state=getattr(config, "RANDOM_STATE", 42))
-        X_train_processed, y_train = rus.fit_resample(X_train_processed, y_train)
-        log.info("Balanceamento (50/50) via RandomUnderSampler aplicado com sucesso na base de treino.")
+        steps.append(("undersampler", RandomUnderSampler(random_state=config.RANDOM_STATE)))
+    steps.append(("model", model))
+    return ImbPipeline(steps=steps)
 
-    return (
-        X_train_processed,
-        X_test_processed,
-        y_train,
-        y_test,
-        preprocessor,
+
+def train_test_split_grouped(X: pd.DataFrame, y: pd.Series, groups: pd.Series):
+    """
+    GroupShuffleSplit por id_aluno: garante que o mesmo aluno (que pode
+    ter ate 2 linhas na base -- 2023 e 2024) nunca aparece em treino E
+    teste ao mesmo tempo.
+    """
+    splitter = GroupShuffleSplit(
+        n_splits=1, test_size=config.TEST_SIZE, random_state=config.RANDOM_STATE
     )
+    train_idx, test_idx = next(splitter.split(X, y, groups=groups))
+    return (
+        X.iloc[train_idx], X.iloc[test_idx],
+        y.iloc[train_idx], y.iloc[test_idx],
+        groups.iloc[train_idx], groups.iloc[test_idx],
+    )
+
+
+def prepare_data(client: bigquery.Client):
+    df = load_data(client)
+    X, y, groups = split_features_target(df)
+
+    log.info("Distribuicao do Target: 0=%s | 1=%s", f"{(y == 0).sum():,}", f"{(y == 1).sum():,}")
+
+    X_train, X_test, y_train, y_test, groups_train, groups_test = train_test_split_grouped(X, y, groups)
+
+    overlap = set(groups_train) & set(groups_test)
+    log.info(
+        "Split agrupado por id_aluno -> Treino: %s | Teste: %s | Alunos em comum (deve ser 0): %d",
+        f"{len(X_train):,}", f"{len(X_test):,}", len(overlap),
+    )
+
+    return X_train, X_test, y_train, y_test, groups_train, groups_test
+
 
 if __name__ == "__main__":
+    import google.auth
     credentials, _ = google.auth.default()
-    client = bigquery.Client(
-        project=config.GCP_PROJECT_ID,
-        credentials=credentials,
-    )
+    client = bigquery.Client(project=config.GCP_PROJECT_ID, credentials=credentials)
     prepare_data(client)

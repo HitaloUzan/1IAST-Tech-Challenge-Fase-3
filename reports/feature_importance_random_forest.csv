@@ -1,0 +1,10 @@
+variavel,importancia,contribuicao_pct
+numeric__taxa_alfabetizacao_municipio,0.3808143294783706,38.08
+numeric__media_portugues_municipio,0.29383440515838816,29.38
+numeric__proporcao_adequado_avancado,0.14145677968372491,14.15
+numeric__proporcao_basico,0.08213344497132435,8.21
+numeric__proporcao_abaixo_basico,0.04127998035387154,4.13
+numeric__peso_aluno,0.029663590908432298,2.97
+numeric__inse_municipio,0.015537459912618694,1.55
+categorical__rede_Estadual,0.00819698692137658,0.82
+categorical__rede_Municipal,0.007083022611893012,0.71

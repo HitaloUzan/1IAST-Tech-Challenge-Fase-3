@@ -1,119 +1,112 @@
+import argparse
 import logging
 from pathlib import Path
 
 import google.auth
-from google.cloud import bigquery
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
+from google.cloud import bigquery
 
 import config
 from src.ml.preprocessing import prepare_data
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models")
+REPORTS_DIR = Path("reports")
 IMAGES_DIR = Path("reports/images")
 
 
-def generate_shap_and_importance(model_filename: str = "xgboost.joblib"):
-    """
-    Gera o Feature Importance (porcentagens) e as 3 visualizações SHAP
-    baseando-se nas variáveis atuais da camada Gold.
-    """
+def generate_shap_and_importance(model_filename: str = "xgboost.joblib", sample_size: int = 2000) -> None:
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     model_path = MODELS_DIR / model_filename
-
     if not model_path.exists():
-        raise FileNotFoundError(f"Modelo não encontrado em: {model_path}")
+        raise FileNotFoundError(f"Modelo nao encontrado em {model_path}. Rode 'python -m src.ml.train' antes.")
 
-    log.info("Carregando artefato: %s", model_path)
-    artifact = joblib.load(model_path)
-    model = artifact["model"] if isinstance(artifact, dict) else artifact
+    log.info("Carregando pipeline: %s", model_path)
+    pipeline = joblib.load(model_path)
+    preprocessor = pipeline.named_steps["preprocessor"]
+    model = pipeline.named_steps["model"]
 
-    # 1. Obter dados processados para calcular o SHAP
     credentials, _ = google.auth.default()
     client = bigquery.Client(project=config.GCP_PROJECT_ID, credentials=credentials)
-    
-    # Pegamos uma amostra do conjunto de teste
-    _, X_test, _, _, preprocessor = prepare_data(client, apply_undersampling=False)
+    _, X_test, _, y_test, _, _ = prepare_data(client)
 
-    # Nomes reais das colunas pós-preprocessor
-    feature_names = [
-        "taxa_alfabetizacao_municipio",
-        "media_portugues_municipio",
-        "proporcao_abaixo_basico",
-        "proporcao_basico",
-        "proporcao_adequado_avancado",
-        "inse_municipio",
-        "peso_aluno",
-        "rede_Estadual",
-        "rede_Municipal",
-    ]
+    # Nomes reais pos-ColumnTransformer (nao hardcoded -- refletem as
+    # categorias que o OneHotEncoder efetivamente viu no treino).
+    feature_names = list(preprocessor.get_feature_names_out())
+    X_test_processed = preprocessor.transform(X_test)
 
-    # ------------------------------------------------------------
-    # A. TABELA DE CONTRIBUIÇÃO (PORCENTAGEM POR VARIÁVEL)
-    # ------------------------------------------------------------
+    sample_size = min(sample_size, X_test_processed.shape[0])
+    rng = np.random.default_rng(config.RANDOM_STATE)
+    sample_idx = rng.choice(X_test_processed.shape[0], size=sample_size, replace=False)
+    X_sample = X_test_processed[sample_idx]
+
+    model_tag = model_filename.replace(".joblib", "")
+
     if hasattr(model, "feature_importances_"):
         importances = model.feature_importances_
-        pct_importances = (importances / importances.sum()) * 100
-
+        pct = importances / importances.sum() * 100
         df_imp = pd.DataFrame({
-            "Variável": feature_names[:len(importances)],
-            "Ganho (Gain)": importances,
-            "Contribuição (%)": np.round(pct_importances, 2)
-        }).sort_values(by="Contribuição (%)", ascending=False)
+            "variavel": feature_names,
+            "importancia": importances,
+            "contribuicao_pct": np.round(pct, 2),
+        }).sort_values("contribuicao_pct", ascending=False)
 
-        log.info("\n===== TABELA DE CONTRIBUIÇÃO DAS VARIÁVEIS =====\n%s", df_imp.to_string(index=False))
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        df_imp.to_csv(REPORTS_DIR / f"feature_importance_{model_tag}.csv", index=False)
+        log.info("\n===== FEATURE IMPORTANCE (%s) =====\n%s", model_tag, df_imp.to_string(index=False))
 
-        # 1. Gráfico: Quais variáveis mais impactam a Alfabetização Infantil? (XGBoost Gain)
         plt.figure(figsize=(10, 6))
-        df_imp_plot = df_imp.sort_values(by="Contribuição (%)", ascending=True)
-        plt.barh(df_imp_plot["Variável"], df_imp_plot["Gain Importância" if "Gain Importância" in df_imp_plot else "Ganho (Gain)"], color="#008080")
-        plt.title("Quais variáveis mais impactam a Alfabetização Infantil? (XGBoost)", fontsize=12, fontweight="bold")
-        plt.xlabel("Importância Relativa (Gain)")
+        df_plot = df_imp.sort_values("contribuicao_pct", ascending=True)
+        plt.barh(df_plot["variavel"], df_plot["contribuicao_pct"], color="#008080")
+        plt.title(f"Fatores que mais impactam a alfabetizacao ({model_tag})", fontsize=12, fontweight="bold")
+        plt.xlabel("Contribuicao relativa (%)")
         plt.grid(axis="x", linestyle="--", alpha=0.7)
         plt.tight_layout()
-        plt.savefig(IMAGES_DIR / "feature_importance_xgboost.png", dpi=300)
+        plt.savefig(IMAGES_DIR / f"feature_importance_{model_tag}.png", dpi=300)
         plt.close()
 
-    # ------------------------------------------------------------
-    # B. CÁLCULO E GRÁFICOS DO SHAP
-    # ------------------------------------------------------------
-    log.info("Calculando valores SHAP (amostra de 2.000 registros)...")
-    sample_size = min(2000, X_test.shape[0])
-    X_sample = X_test[:sample_size]
+    log.info("Calculando valores SHAP (amostra de %d registros)...", sample_size)
+    model_class = model.__class__.__name__
+    if model_class in ("XGBClassifier", "RandomForestClassifier"):
+        explainer = shap.TreeExplainer(model)
+    else:
+        background = shap.sample(
+            X_test_processed, min(200, X_test_processed.shape[0]), random_state=config.RANDOM_STATE
+        )
+        explainer = shap.Explainer(model, background)
 
-    explainer = shap.TreeExplainer(model)
     shap_values = explainer(X_sample)
-    
-    # Atribui os nomes das colunas ao objeto SHAP
-    shap_values.feature_names = feature_names[:X_sample.shape[1]]
+    if shap_values.values.ndim == 3:
+        # TreeExplainer em classificador binario devolve (n, features, classes) --
+        # ficamos com a classe positiva (1 = Alfabetizado).
+        shap_values = shap_values[..., 1]
+    shap_values.feature_names = feature_names
 
-    # 2. Gráfico: Impacto Direcional das Variáveis na Alfabetização Infantil (SHAP Summary)
     plt.figure(figsize=(10, 6))
-    shap.summary_plot(shap_values, X_sample, show=False)
-    plt.title("Impacto Direcional das Variáveis na Alfabetização Infantil (SHAP)", fontsize=12, fontweight="bold", pad=20)
+    shap.summary_plot(shap_values, X_sample, feature_names=feature_names, show=False)
+    plt.title("Impacto direcional das variaveis na alfabetizacao (SHAP)", fontsize=12, fontweight="bold", pad=20)
     plt.tight_layout()
-    plt.savefig(IMAGES_DIR / "shap_summary_plot.png", dpi=300)
+    plt.savefig(IMAGES_DIR / f"shap_summary_{model_tag}.png", dpi=300)
     plt.close()
 
-    # 3. Gráfico: SHAP Waterfall (Exemplo de um aluno individual)
     plt.figure(figsize=(8, 6))
     shap.plots.waterfall(shap_values[0], show=False)
-    plt.title("Por que este aluno específico foi classificado assim? (SHAP Waterfall)", fontsize=11, fontweight="bold", pad=20)
+    plt.title("Por que este aluno especifico foi classificado assim? (SHAP)", fontsize=11, fontweight="bold", pad=20)
     plt.tight_layout()
-    plt.savefig(IMAGES_DIR / "shap_waterfall_single.png", dpi=300)
+    plt.savefig(IMAGES_DIR / f"shap_waterfall_{model_tag}.png", dpi=300)
     plt.close()
 
-    log.info("Todos os 3 gráficos SHAP e a tabela de porcentagens foram salvos em: %s", IMAGES_DIR)
+    log.info("Graficos salvos em %s", IMAGES_DIR)
 
 
 if __name__ == "__main__":
-    generate_shap_and_importance()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="xgboost.joblib")
+    args = parser.parse_args()
+    generate_shap_and_importance(args.model)

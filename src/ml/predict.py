@@ -4,27 +4,18 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models")
 
 
-def load_trained_artifact(model_filename: str = "xgboost.joblib"):
-    """
-    Carrega o artefato salvo contendo o modelo e o preprocessor.
-    """
+def load_pipeline(model_filename: str = "xgboost.joblib"):
     model_path = MODELS_DIR / model_filename
-
     if not model_path.exists():
-        raise FileNotFoundError(f"Modelo não encontrado em: {model_path}")
-
-    log.info("Carregando artefato do modelo: %s", model_path)
-    artifact = joblib.load(model_path)
-    return artifact
+        raise FileNotFoundError(f"Modelo nao encontrado em: {model_path}")
+    log.info("Carregando pipeline: %s", model_path)
+    return joblib.load(model_path)
 
 
 def predict_risk(
@@ -33,49 +24,28 @@ def predict_risk(
     threshold: float = 0.55,
 ) -> pd.DataFrame:
     """
-    Aplica o preprocessor nos dados brutos de entrada, realiza a predição de risco
-    e aplica o limiar de negócio (0.55).
+    Recebe dados brutos (mesmas colunas da Gold ML) e aplica o pipeline
+    completo (preprocessor + modelo em um unico objeto) direto -- nao ha
+    mais preprocessor separado pra carregar.
     """
-    artifact = load_trained_artifact(model_filename)
-    
-    # Se o artefato for um dicionário contendo modelo + preprocessor separados
-    if isinstance(artifact, dict) and "model" in artifact:
-        model = artifact["model"]
-        preprocessor = artifact.get("preprocessor", None)
-    else:
-        model = artifact
-        preprocessor = None
+    pipeline = load_pipeline(model_filename)
 
-    # Se a entrada ainda tiver strings categóricas, converte para category
-    df_processed = df_input.copy()
-    if "rede" in df_processed.columns:
-        df_processed["rede"] = df_processed["rede"].astype("category")
-
-    # Aplica o preprocessor caso ele exista
-    if preprocessor is not None:
-        X_trans = preprocessor.transform(df_processed)
-    else:
-        X_trans = df_processed
-
-    log.info("Calculando probabilidades de alfabetização...")
-    probabilities_alfabetizado = model.predict_proba(X_trans)[:, 1]
+    log.info("Calculando probabilidades de alfabetizacao...")
+    probabilities_alfabetizado = pipeline.predict_proba(df_input)[:, 1]
 
     df_results = df_input.copy()
     df_results["probabilidade_alfabetizado"] = probabilities_alfabetizado.round(4)
-
-    # Regra de Negócio com Threshold Tuning
     df_results["predicao_final"] = (probabilities_alfabetizado >= threshold).astype(int)
     df_results["status_risco"] = df_results["predicao_final"].map({
         0: "ALTO RISCO (Busca Ativa)",
         1: "Baixo Risco / Adequado",
     })
 
-    log.info("Inferência concluída com sucesso!")
+    log.info("Inferencia concluida com sucesso!")
     return df_results
 
 
 def main() -> None:
-    # Exemplo sintético simulando registros brutos da camada Gold
     sample_data = pd.DataFrame([
         {
             "taxa_alfabetizacao_municipio": 82.5,
@@ -99,10 +69,10 @@ def main() -> None:
         },
     ])
 
-    log.info("Executando inferência de teste...")
+    log.info("Executando inferencia de teste...")
     results = predict_risk(sample_data, model_filename="xgboost.joblib", threshold=0.55)
 
-    print("\n===== RESULTADOS DA PREDIÇÃO (INFERÊNCIA) =====")
+    print("\n===== RESULTADOS DA PREDICAO (INFERENCIA) =====")
     print(results[["rede", "inse_municipio", "probabilidade_alfabetizado", "status_risco"]])
 
 

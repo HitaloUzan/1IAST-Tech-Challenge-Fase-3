@@ -1,148 +1,74 @@
+import json
 import logging
 from pathlib import Path
 
 import google.auth
-from google.cloud import bigquery
 import joblib
 import pandas as pd
-
+from google.cloud import bigquery
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
+from sklearn.metrics import accuracy_score, classification_report, f1_score, roc_auc_score
 from xgboost import XGBClassifier
 
-from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
-
 import config
-from src.ml.preprocessing import prepare_data
+from src.ml.preprocessing import build_full_pipeline, prepare_data
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
-
-
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
 
 MODELS_DIR = Path("models")
 REPORTS_DIR = Path("reports")
+BEST_PARAMS_PATH = REPORTS_DIR / "optuna_best_params.json"
 
-RANDOM_STATE = config.RANDOM_STATE
+DEFAULT_PARAMS = {
+    "logistic": {"C": 1.0},
+    "random_forest": {
+        "n_estimators": 200, "max_depth": 12, "min_samples_leaf": 2, "max_features": "sqrt",
+    },
+    "xgboost": {
+        "n_estimators": 200, "max_depth": 8, "learning_rate": 0.05,
+        "subsample": 0.8, "colsample_bytree": 0.8, "min_child_weight": 1, "reg_lambda": 1.0,
+    },
+}
 
 
-# ============================================================
-# MODELOS
-# ============================================================
+def load_best_params() -> dict:
+    if BEST_PARAMS_PATH.exists():
+        with open(BEST_PARAMS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        log.info("Usando hiperparametros otimizados pelo Optuna (%s).", BEST_PARAMS_PATH)
+        return data
+    log.warning(
+        "%s nao encontrado -- rode 'python -m src.ml.tune' antes para otimizar. "
+        "Usando hiperparametros default.", BEST_PARAMS_PATH,
+    )
+    return {}
 
-def build_model(model_name):
-    """
-    Cria o modelo de acordo com o experimento.
-    """
 
-    if model_name == "logistic_balanced":
+def build_model(model_name: str, params: dict):
+    if model_name == "logistic":
         return LogisticRegression(
-            max_iter=1000,
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-            class_weight="balanced",
+            max_iter=1000, class_weight="balanced",
+            random_state=config.RANDOM_STATE, **params,
         )
-
-    if model_name == "random_forest_balanced":
+    if model_name == "random_forest":
         return RandomForestClassifier(
-            n_estimators=100,
-            max_depth=12,
-            min_samples_leaf=2,
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-            class_weight="balanced",
+            class_weight="balanced", random_state=config.RANDOM_STATE, n_jobs=-1, **params,
         )
-
-    if model_name == "hist_gradient_boosting":
-        return HistGradientBoostingClassifier(
-            max_iter=100,
-            learning_rate=0.1,
-            max_leaf_nodes=31,
-            class_weight="balanced",
-            random_state=RANDOM_STATE,
-        )
-
     if model_name == "xgboost":
         return XGBClassifier(
-            n_estimators=200,
-            max_depth=8,
-            learning_rate=0.05,
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
+            random_state=config.RANDOM_STATE, n_jobs=-1,
+            tree_method="hist", eval_metric="auc", **params,
         )
-
-    raise ValueError(
-        f"Modelo não reconhecido: {model_name}"
-    )
+    raise ValueError(f"Modelo nao reconhecido: {model_name}")
 
 
-# ============================================================
-# TREINAMENTO
-# ============================================================
+def evaluate_model(pipeline, model_name, X_test, y_test) -> dict:
+    predictions = pipeline.predict(X_test)
+    probabilities = pipeline.predict_proba(X_test)[:, 1]
 
-def train_model(model, X_train, y_train):
-    """
-    Treina o modelo recebido.
-    """
-
-    log.info(
-        "Iniciando treinamento: %s",
-        model.__class__.__name__,
-    )
-
-    model.fit(
-        X_train,
-        y_train,
-    )
-
-    log.info("Treinamento concluído.")
-
-    return model
-
-
-# ============================================================
-# AVALIAÇÃO
-# ============================================================
-
-def evaluate_model(
-    model,
-    model_name,
-    X_test,
-    y_test,
-):
-    """
-    Avalia o modelo e retorna suas métricas globais e por classe.
-    """
-
-    log.info(
-        "Iniciando avaliação do modelo: %s",
-        model_name,
-    )
-
-    predictions = model.predict(X_test)
-    probabilities = model.predict_proba(X_test)[:, 1]
-
-    # Relatório detalhado para extrair recall individual da classe 0 (Não Alfabetizado)
-    report_dict = classification_report(
-        y_test,
-        predictions,
-        output_dict=True,
-    )
+    report_dict = classification_report(y_test, predictions, output_dict=True)
 
     metrics = {
         "model": model_name,
@@ -153,184 +79,56 @@ def evaluate_model(
         "roc_auc": roc_auc_score(y_test, probabilities),
     }
 
-    log.info("===== MÉTRICAS =====")
-
-    for metric, value in metrics.items():
-        if metric != "model":
-            log.info(
-                "%s: %.4f",
-                metric.upper(),
-                value,
-            )
-
-    print("\n===== CLASSIFICATION REPORT =====")
-
-    print(
-        classification_report(
-            y_test,
-            predictions,
-            target_names=[
-                "Não alfabetizado",
-                "Alfabetizado",
-            ],
-        )
-    )
+    log.info("===== %s =====", model_name)
+    for k, v in metrics.items():
+        if k != "model":
+            log.info("%s: %.4f", k.upper(), v)
 
     return metrics
 
 
-# ============================================================
-# SALVAMENTO
-# ============================================================
-
-def save_model(
-    model,
-    model_name,
-    preprocessor,
-    metrics,
-):
-    """
-    Salva o modelo e o preprocessing juntos.
-    """
-
-    MODELS_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    model_path = (
-        MODELS_DIR
-        / f"{model_name}.joblib"
-    )
-
-    artifact = {
-        "model": model,
-        "preprocessor": preprocessor,
-        "metrics": metrics,
-    }
-
-    joblib.dump(
-        artifact,
-        model_path,
-    )
-
-    log.info(
-        "Modelo salvo em: %s",
-        model_path,
-    )
-
-
-# ============================================================
-# RESULTADOS
-# ============================================================
-
-def save_results(results):
-    """
-    Salva os resultados dos experimentos em CSV.
-    """
-
-    REPORTS_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    results_path = (
-        REPORTS_DIR
-        / "model_results.csv"
-    )
-
-    df_results = pd.DataFrame(results)
-
-    df_results.to_csv(
-        results_path,
-        index=False,
-    )
-
-    log.info(
-        "Resultados salvos em: %s",
-        results_path,
-    )
-
-    print("\n===== COMPARAÇÃO DOS MODELOS =====")
-
-    print(
-        df_results[
-            [
-                "model",
-                "accuracy",
-                "f1_macro",
-                "recall_nao_alfabetizado",
-                "recall_alfabetizado",
-                "roc_auc",
-            ]
-        ].to_string(index=False)
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
 def main() -> None:
-
-    log.info(
-        "Iniciando pipeline de treinamento ML..."
-    )
-
-    # Autenticação BigQuery
     credentials, _ = google.auth.default()
+    client = bigquery.Client(project=config.GCP_PROJECT_ID, credentials=credentials)
 
-    client = bigquery.Client(
-        project=config.GCP_PROJECT_ID,
-        credentials=credentials,
-    )
+    X_train, X_test, y_train, y_test, groups_train, groups_test = prepare_data(client)
 
-    # Preparação dos dados
-    (
-        X_train,
-        X_test,
-        y_train,
-        y_test,
-        preprocessor,
-    ) = prepare_data(client)
+    best = load_best_params()
 
-    log.info(
-        "Dados preparados para os experimentos."
-    )
-
-    # Execução de todos os 3 experimentos para a tabela comparativa
-    experiments = [
-        "logistic_balanced",
-        "random_forest_balanced",
-        "xgboost",  # ou "hist_gradient_boosting"
-    ]
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
     results = []
+    for model_name in ["logistic", "random_forest", "xgboost"]:
+        params = best.get(model_name, {}).get("best_params", DEFAULT_PARAMS[model_name])
+        log.info("Treinando %s com params: %s", model_name, params)
 
-    for model_name in experiments:
+        model = build_model(model_name, params)
+        # Pipeline unico (preprocessor + undersampler + modelo) -- e o
+        # artefato salvo, nao mais modelo/preprocessor separados.
+        pipeline = build_full_pipeline(model, apply_undersampling=True)
+        pipeline.fit(X_train, y_train)
 
-        log.info("========================================")
-        log.info("EXPERIMENTO: %s", model_name)
-        log.info("========================================")
-
-        # Criar modelo
-        model = build_model(model_name)
-
-        # Treinar
-        model = train_model(model, X_train, y_train)
-
-        # Avaliar
-        metrics = evaluate_model(model, model_name, X_test, y_test)
-
-        # Salvar modelo
-        save_model(model, model_name, preprocessor, metrics)
-
+        metrics = evaluate_model(pipeline, model_name, X_test, y_test)
+        metrics["params"] = json.dumps(params, ensure_ascii=False)
         results.append(metrics)
 
-    # Salvar e exibir a tabela comparativa final
-    save_results(results)
+        model_path = MODELS_DIR / f"{model_name}.joblib"
+        joblib.dump(pipeline, model_path)
+        log.info("Pipeline completo salvo em %s", model_path)
 
-    log.info("Pipeline de treinamento concluída.")
+    df_results = pd.DataFrame(results)
+    df_results.to_csv(REPORTS_DIR / "model_results.csv", index=False)
+
+    champion = df_results.loc[df_results["roc_auc"].idxmax(), "model"]
+    log.info("Modelo campeao (maior ROC-AUC no teste agrupado por aluno): %s", champion)
+
+    print("\n===== COMPARACAO DOS MODELOS =====")
+    print(
+        df_results[
+            ["model", "accuracy", "f1_macro", "recall_nao_alfabetizado", "recall_alfabetizado", "roc_auc"]
+        ].to_string(index=False)
+    )
 
 
 if __name__ == "__main__":
