@@ -46,34 +46,55 @@ def predict_risk(
 
 
 def main() -> None:
+    """
+    Exemplo de inferencia: dois alunos ficticios em contextos opostos --
+    um municipio consolidado e um municipio critico (ver perfis de cluster
+    em reports/q3_perfil_clusters.csv). As colunas espelham exatamente
+    FEATURE_COLUMNS de src/preprocessing/features.py.
+    """
     sample_data = pd.DataFrame([
         {
-            "taxa_alfabetizacao_municipio": 82.5,
-            "media_portugues_municipio": 195.4,
-            "proporcao_abaixo_basico": 0.35,
-            "proporcao_basico": 0.40,
-            "proporcao_adequado_avancado": 0.25,
-            "inse_municipio": 4.2,
+            "taxa_alfabetizacao_municipio": 83.8,
+            "media_portugues_municipio": 780.0,
+            "proporcao_abaixo_basico": 5.0,
+            "proporcao_basico": 25.0,
+            "proporcao_adequado_avancado": 70.0,
+            "inse_municipio": 4.73,
             "peso_aluno": 1.0,
+            "taxa_alfabetizacao_escola_prior": 0.82,
+            "n_alunos_prior_escola": 45,
+            "tem_historico_escola": 1,
+            "meta_2024": 60.0,
+            "percentual_participacao": 94.7,
+            "nivel_alfabetizacao": 4,
             "rede": "Municipal",
+            "sigla_uf_code": "42",
         },
         {
-            "taxa_alfabetizacao_municipio": 60.1,
-            "media_portugues_municipio": 160.0,
-            "proporcao_abaixo_basico": 0.60,
-            "proporcao_basico": 0.30,
-            "proporcao_adequado_avancado": 0.10,
-            "inse_municipio": 2.8,
+            "taxa_alfabetizacao_municipio": 36.4,
+            "media_portugues_municipio": 700.0,
+            "proporcao_abaixo_basico": 45.0,
+            "proporcao_basico": 40.0,
+            "proporcao_adequado_avancado": 15.0,
+            "inse_municipio": 4.43,
             "peso_aluno": 1.0,
-            "rede": "Estadual",
+            "taxa_alfabetizacao_escola_prior": 0.31,
+            "n_alunos_prior_escola": 28,
+            "tem_historico_escola": 1,
+            "meta_2024": 12.0,
+            "percentual_participacao": 84.3,
+            "nivel_alfabetizacao": 0,
+            "rede": "Municipal",
+            "sigla_uf_code": "29",
         },
     ])
 
     log.info("Executando inferencia de teste...")
-    results = predict_risk(sample_data, model_filename="xgboost.joblib", threshold=0.55)
+    results = predict_risk(sample_data, model_filename="random_forest.joblib", threshold=0.55)
 
     print("\n===== RESULTADOS DA PREDICAO (INFERENCIA) =====")
-    print(results[["rede", "inse_municipio", "probabilidade_alfabetizado", "status_risco"]])
+    print(results[["sigla_uf_code", "taxa_alfabetizacao_municipio", "inse_municipio",
+                   "probabilidade_alfabetizado", "status_risco"]].to_string(index=False))
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from google.cloud import bigquery
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 import config
-from src.ml.preprocessing import prepare_data
+from src.preprocessing.features import prepare_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ def run_threshold_simulation(y_test, y_proba, thresholds=THRESHOLDS) -> pd.DataF
 def main(model_filename: str = "xgboost.joblib") -> pd.DataFrame:
     model_path = MODELS_DIR / model_filename
     if not model_path.exists():
-        raise FileNotFoundError(f"Modelo nao encontrado em {model_path}. Rode 'python -m src.ml.train' antes.")
+        raise FileNotFoundError(f"Modelo nao encontrado em {model_path}. Rode 'python -m src.modeling.train' antes.")
 
     log.info("Carregando pipeline: %s", model_path)
     pipeline = joblib.load(model_path)

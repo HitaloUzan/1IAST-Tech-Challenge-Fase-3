@@ -30,10 +30,49 @@ NUMERIC_FEATURES = [
     "taxa_alfabetizacao_escola_prior",
     "n_alunos_prior_escola",
     "tem_historico_escola",
+    # Metas do Compromisso Nacional Crianca Alfabetizada (PDF pg.3-4).
+    # Sao trajetorias publicadas ANTES da avaliacao, nao derivadas do
+    # resultado do aluno -- nao ha vazamento em usa-las no mesmo ano.
+    #
+    # meta_2030 e gap_meta_2030 foram TESTADAS E REMOVIDAS por redundancia
+    # matematica (nao por falta de aderencia ao enunciado -- continuam na
+    # tabela gold e alimentam as analises de negocio em
+    # src/evaluation/business_questions.py):
+    #   - meta_2030 tem UM unico valor distinto na base (80.0 para todos os
+    #     municipios) -> variancia zero, o modelo atribuiu 0.0% de importancia.
+    #   - gap_meta_2030 = taxa_alfabetizacao_municipio - 80.0, portanto tem
+    #     correlacao 1.0000 com taxa_alfabetizacao_municipio -> nao carrega
+    #     informacao nova, apenas divide a importancia com ela e faz a tabela
+    #     de Feature Importance parecer que "metas explicam 17,75%" quando e
+    #     a taxa municipal reapresentada.
+    "meta_2024",
+    "percentual_participacao",
+    "nivel_alfabetizacao",
 ]
 
 CATEGORICAL_FEATURES = ["rede", "sigla_uf_code"]
 
+# Colunas de identificacao: nunca entram como feature do modelo, mas sao
+# devolvidas por prepare_data() para as analises de negocio (ranking de
+# municipios em risco, clusterizacao regional, projecao de metas).
+ID_COLUMNS = ["id_municipio", "id_escola", "ano"]
+
+# TargetEncoder em id_municipio/id_escola foi TESTADO E DESCARTADO -- ver
+# secao "Vazamento same-cohort" no README. Resumo: o cross-fitting interno
+# do TargetEncoder protege contra vazar o target da PROPRIA LINHA, mas nao
+# contra vazar o target dos COLEGAS DE ESCOLA medidos na mesma edicao do
+# SAEB. Como treino e teste sao divididos por aluno (nao por escola/ano),
+# codificar id_escola pela media dos alunos de treino entrega ao modelo o
+# resultado da turma do proprio aluno -- informacao que nao existiria numa
+# predicao real, onde a prova daquele ano ainda nao aconteceu.
+# Evidencia (mesmo split de teste, logistic com params do Optuna):
+#   sem target encoding ............ 0.6820
+#   so id_municipio ................ 0.6821  (+0.0001, ruido)
+#   id_municipio + id_escola ....... 0.7032  (+0.0212, todo o ganho e do id_escola)
+# Reforcado pelo sinal classico de vazamento: o ROC-AUC de teste (0.7032)
+# ficava ACIMA do ROC-AUC da validacao cruzada (0.6840). O efeito equivalente
+# e legitimo ja esta capturado por taxa_alfabetizacao_escola_prior, que usa
+# apenas o ano ANTERIOR.
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
 
@@ -55,8 +94,16 @@ def load_data(client: bigquery.Client) -> pd.DataFrame:
             taxa_alfabetizacao_escola_prior,
             n_alunos_prior_escola,
             tem_historico_escola,
+            meta_2030,
+            meta_2024,
+            gap_meta_2030,
+            percentual_participacao,
+            nivel_alfabetizacao,
             rede,
             sigla_uf_code,
+            id_municipio,
+            id_escola,
+            ano,
             {TARGET_COLUMN}
         FROM `{config.GCP_PROJECT_ID}.{config.BQ_DATASET_GOLD}.{config.ML_FEATURES_TABLE}`
         WHERE rede IN ('Municipal', 'Estadual')
@@ -134,19 +181,35 @@ def train_test_split_grouped(X: pd.DataFrame, y: pd.Series, groups: pd.Series):
     )
 
 
-def prepare_data(client: bigquery.Client):
+def prepare_data(client: bigquery.Client, return_ids: bool = False):
+    """
+    return_ids=True devolve tambem os identificadores (id_municipio,
+    id_escola, ano) das linhas de teste -- usados pelas analises de negocio
+    (src/evaluation/business_questions.py). Eles NUNCA entram como feature.
+    """
     df = load_data(client)
     X, y, groups = split_features_target(df)
 
     log.info("Distribuicao do Target: 0=%s | 1=%s", f"{(y == 0).sum():,}", f"{(y == 1).sum():,}")
 
-    X_train, X_test, y_train, y_test, groups_train, groups_test = train_test_split_grouped(X, y, groups)
+    splitter = GroupShuffleSplit(
+        n_splits=1, test_size=config.TEST_SIZE, random_state=config.RANDOM_STATE
+    )
+    train_idx, test_idx = next(splitter.split(X, y, groups=groups))
+
+    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    groups_train, groups_test = groups.iloc[train_idx], groups.iloc[test_idx]
 
     overlap = set(groups_train) & set(groups_test)
     log.info(
         "Split agrupado por id_aluno -> Treino: %s | Teste: %s | Alunos em comum (deve ser 0): %d",
         f"{len(X_train):,}", f"{len(X_test):,}", len(overlap),
     )
+
+    if return_ids:
+        ids_test = df[ID_COLUMNS].iloc[test_idx]
+        return X_train, X_test, y_train, y_test, groups_train, groups_test, ids_test
 
     return X_train, X_test, y_train, y_test, groups_train, groups_test
 

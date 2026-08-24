@@ -11,21 +11,21 @@ import shap
 from google.cloud import bigquery
 
 import config
-from src.ml.preprocessing import prepare_data
+from src.preprocessing.features import prepare_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models")
 REPORTS_DIR = Path("reports")
-IMAGES_DIR = Path("reports/images")
+IMAGES_DIR = Path("images")
 
 
 def generate_shap_and_importance(model_filename: str = "xgboost.joblib", sample_size: int = 2000) -> None:
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     model_path = MODELS_DIR / model_filename
     if not model_path.exists():
-        raise FileNotFoundError(f"Modelo nao encontrado em {model_path}. Rode 'python -m src.ml.train' antes.")
+        raise FileNotFoundError(f"Modelo nao encontrado em {model_path}. Rode 'python -m src.modeling.train' antes.")
 
     log.info("Carregando pipeline: %s", model_path)
     pipeline = joblib.load(model_path)

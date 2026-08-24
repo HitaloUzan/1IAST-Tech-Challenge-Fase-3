@@ -12,7 +12,7 @@ from sklearn.metrics import accuracy_score, classification_report, f1_score, roc
 from xgboost import XGBClassifier
 
 import config
-from src.ml.preprocessing import build_full_pipeline, prepare_data
+from src.preprocessing.features import build_full_pipeline, prepare_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def load_best_params() -> dict:
         log.info("Usando hiperparametros otimizados pelo Optuna (%s).", BEST_PARAMS_PATH)
         return data
     log.warning(
-        "%s nao encontrado -- rode 'python -m src.ml.tune' antes para otimizar. "
+        "%s nao encontrado -- rode 'python -m src.modeling.tune' antes para otimizar. "
         "Usando hiperparametros default.", BEST_PARAMS_PATH,
     )
     return {}

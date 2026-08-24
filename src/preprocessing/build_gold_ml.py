@@ -73,6 +73,25 @@ ML_GOLD_TABLES = {
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET_SILVER}.inse_escola_clean`
             WHERE id_municipio IS NOT NULL
             GROUP BY 1
+        ),
+        metas_municipio AS (
+            -- Metas municipais do Compromisso Nacional Crianca Alfabetizada.
+            -- O PDF lista "Metas nacionais e estaduais" e "Metas municipais"
+            -- como parte da base analitica; alem de aderencia ao enunciado,
+            -- percentual_participacao e nivel_alfabetizacao sao variaveis
+            -- preditivas que nao estavam sendo usadas.
+            -- Casado pelo MESMO ano da linha (meta e trajetoria publicada,
+            -- definida antes da avaliacao -- nao deriva do resultado do aluno).
+            SELECT
+                SUBSTR(CAST(id_municipio AS STRING), 1, 6) AS id_municipio_6dig,
+                CAST(ano AS INT64) AS ano,
+                MAX(meta_alfabetizacao_2030) AS meta_2030,
+                MAX(meta_alfabetizacao_2024) AS meta_2024,
+                MAX(percentual_participacao) AS percentual_participacao,
+                MAX(SAFE_CAST(nivel_alfabetizacao AS INT64)) AS nivel_alfabetizacao
+            FROM `{GCP_PROJECT_ID}.{BQ_DATASET_SILVER}.metas_consolidadas`
+            WHERE escopo = 'municipio' AND id_municipio IS NOT NULL
+            GROUP BY 1, 2
         )
         SELECT
             CAST(a.ano AS INT64) AS ano,
@@ -95,7 +114,13 @@ ML_GOLD_TABLES = {
 
             e.taxa_alfabetizacao_escola_prior,
             e.n_alunos_prior_escola,
-            CASE WHEN e.id_escola IS NOT NULL THEN 1 ELSE 0 END AS tem_historico_escola
+            CASE WHEN e.id_escola IS NOT NULL THEN 1 ELSE 0 END AS tem_historico_escola,
+
+            mt.meta_2030,
+            mt.meta_2024,
+            mt.percentual_participacao,
+            mt.nivel_alfabetizacao,
+            m.taxa_alfabetizacao_municipio - mt.meta_2030 AS gap_meta_2030
 
         FROM `{GCP_PROJECT_ID}.{BQ_DATASET_SILVER}.alunos_clean` a
 
@@ -109,6 +134,10 @@ ML_GOLD_TABLES = {
         LEFT JOIN escola_prior_year e
             ON TRIM(CAST(SAFE_CAST(a.id_escola AS INT64) AS STRING)) = e.id_escola
             AND CAST(a.ano AS INT64) = e.ano_alvo
+
+        LEFT JOIN metas_municipio mt
+            ON SUBSTR(CAST(a.id_municipio AS STRING), 1, 6) = mt.id_municipio_6dig
+            AND CAST(a.ano AS INT64) = mt.ano
 
         WHERE a.id_municipio IS NOT NULL
           AND a.id_aluno IS NOT NULL

@@ -11,3 +11,5 @@ matplotlib==3.11.1
 joblib==1.5.3
 google-cloud-bigquery-storage==2.40.0
 seaborn==0.13.2
+jupyter==1.1.1
+notebook==7.3.2

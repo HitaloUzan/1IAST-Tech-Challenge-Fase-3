@@ -12,7 +12,7 @@ import config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-IMAGES_DIR = Path("reports/images")
+IMAGES_DIR = Path("images")
 
 NUMERIC_FEATURES = [
     "taxa_alfabetizacao_municipio",

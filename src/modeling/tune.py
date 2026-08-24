@@ -14,7 +14,7 @@ from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
 from xgboost import XGBClassifier
 
 import config
-from src.ml.preprocessing import build_full_pipeline
+from src.preprocessing.features import build_full_pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -156,7 +156,7 @@ def main(models=None) -> None:
     import google.auth
     from google.cloud import bigquery
 
-    from src.ml.preprocessing import prepare_data
+    from src.preprocessing.features import prepare_data
 
     models = models or MODEL_NAMES
 
