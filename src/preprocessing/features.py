@@ -50,6 +50,50 @@ NUMERIC_FEATURES = [
     "nivel_alfabetizacao",
 ]
 
+# Enriquecimento externo (Censo Escolar + Indicadores Educacionais), no grao
+# municipio x rede. Fontes citadas nominalmente no PDF (pg.3-4). O grao de
+# escola era o alvo original, mas e inalcancavel: id_escola do SAEB e um
+# contador anonimizado na origem -- ver comentario extenso em build_gold_ml.py
+# e a secao "Limitacoes" do README.
+#
+# Cobertura verificada na gold v3 (3.354.637 linhas, redes Municipal/Estadual):
+#   pct_escolas_*        100.00%      atu_2ano        99.99%
+#   n_escolas_censo      100.00%      afd_grupo1_pct  99.80%
+#   dsu_medio             99.99%      had_2ano        85.33%
+#   tdi_2ano              83.59%      ird_medio       83.59%
+#
+# TESTADAS E EXCLUIDAS por cobertura insuficiente (seguem na tabela gold, como
+# meta_2030, para nao perder o registro da tentativa):
+#   - icg_medio ......................  3,75% -- icg_nivel_complexidade_gestao_escola
+#     e rotulo textual no INEP, o SAFE_CAST numerico devolve NULL na quase
+#     totalidade das linhas.
+#   - taxa_reprovacao_2ano_prior .... 10,50% -- e 0,00% em TODO o ano de 2023
+#     (o INEP nao publicou reprovacao de 2o ano em 2022). Imputar a mediana em
+#     ~90% das linhas so injetaria ruido.
+#   - taxa_abandono_2ano_prior ...... 55,20% -- presente em 2024 e ausente em
+#     2023, entao a propria presenca do valor vira proxy da variavel `ano`.
+#   - tem_censo_escolar ............. 100% de cobertura => variancia zero,
+#     inutil como flag (o equivalente de tem_historico_escola nao se aplica aqui).
+CENSO_FEATURES = [
+    "pct_escolas_rurais",
+    "pct_escolas_biblioteca",
+    "pct_escolas_internet",
+    "pct_escolas_agua_potavel",
+    "pct_escolas_esgoto_publico",
+    "pct_escolas_energia_publica",
+    "n_escolas_censo_celula",
+    "atu_2ano",
+    "had_2ano",
+    "tdi_2ano",
+    "afd_grupo1_pct",
+    "ird_medio",
+    "dsu_medio",
+]
+
+# Para o A/B do enriquecimento: basta trocar por [] para reproduzir o baseline
+# v2 (ROC-AUC 0,6881) com o mesmo split e os mesmos hiperparametros.
+NUMERIC_FEATURES = NUMERIC_FEATURES + CENSO_FEATURES
+
 CATEGORICAL_FEATURES = ["rede", "sigla_uf_code"]
 
 # Colunas de identificacao: nunca entram como feature do modelo, mas sao
@@ -78,9 +122,12 @@ FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
 def load_data(client: bigquery.Client) -> pd.DataFrame:
     """
-    Carrega gold.ml_features_alunos_v2 (mesma logica de join de
-    NaiaraMartins/1IAST-Tech-Challenge-Fase-3, com id_aluno preservado).
+    Carrega a gold ML apontada por config.ML_FEATURES_TABLE (v3: mesma logica
+    de join de NaiaraMartins/1IAST-Tech-Challenge-Fase-3, com id_aluno
+    preservado, mais o enriquecimento Censo Escolar / Indicadores Educacionais
+    no grao municipio x rede).
     """
+    censo_cols = "".join(f"{c},\n            " for c in CENSO_FEATURES)
     query = f"""
         SELECT
             {GROUP_COLUMN},
@@ -99,6 +146,7 @@ def load_data(client: bigquery.Client) -> pd.DataFrame:
             gap_meta_2030,
             percentual_participacao,
             nivel_alfabetizacao,
+            {censo_cols}
             rede,
             sigla_uf_code,
             id_municipio,

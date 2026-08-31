@@ -107,6 +107,6 @@ def generate_shap_and_importance(model_filename: str = "xgboost.joblib", sample_
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="xgboost.joblib")
+    parser.add_argument("--model", default="random_forest.joblib")
     args = parser.parse_args()
     generate_shap_and_importance(args.model)

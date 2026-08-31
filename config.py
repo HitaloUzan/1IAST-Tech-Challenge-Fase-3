@@ -19,7 +19,13 @@ BQ_DATASET_GOLD = "gold"
 # Tabela propria (nao sobrescreve gold.ml_features_alunos, usada pelo
 # pipeline original de NaiaraMartins/1IAST-Tech-Challenge-Fase-3 no mesmo
 # projeto GCP). Mesma logica de join, com id_aluno preservado.
-ML_FEATURES_TABLE = "ml_features_alunos_v2"
+#
+# v3 acrescenta o enriquecimento com Censo Escolar e Indicadores Educacionais
+# no grao municipio x rede (ver build_gold_ml.py). A v2 continua intacta no
+# BigQuery e serve de baseline para o A/B -- basta apontar esta constante de
+# volta para "ml_features_alunos_v2".
+ML_FEATURES_TABLE = "ml_features_alunos_v3"
+ML_FEATURES_TABLE_BASELINE = "ml_features_alunos_v2"
 
 # ============================================
 # Machine Learning
