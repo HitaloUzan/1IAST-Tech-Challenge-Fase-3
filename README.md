@@ -18,7 +18,7 @@ Fork de [NaiaraMartins/1IAST-Tech-Challenge-Fase-3](https://github.com/NaiaraMar
 
 ## 4. Descricao da Base Utilizada
 
-Tabela `gold.ml_features_alunos_v2`, com grao de **aluno** (`id_aluno`), 3.354.661 registros das edicoes 2023 e 2024, construida por `src/preprocessing/build_gold_ml.py` a partir das camadas silver/gold da Fase 2:
+Tabela `gold.ml_features_alunos_v3`, com grao de **aluno** (`id_aluno`), 3.354.661 registros das edicoes 2023 e 2024, construida por `src/preprocessing/build_gold_ml.py` a partir das camadas silver/gold da Fase 2:
 
 | Fonte (Fase 2) | Contribuicao |
 |---|---|
@@ -27,6 +27,19 @@ Tabela `gold.ml_features_alunos_v2`, com grao de **aluno** (`id_aluno`), 3.354.6
 | `silver.inse_escola_clean` | Indicador socioeconomico (INSE), agregado por municipio |
 | `silver.metas_consolidadas` | Metas municipais 2024-2030, participacao, nivel de alfabetizacao |
 | `id_municipio` (IBGE) | Dados territoriais: municipio e UF |
+
+### Enriquecimento com fontes externas
+
+O enunciado (pg.3-4) autoriza expressamente enriquecer a base analitica com fontes externas e cita o **Censo Escolar** entre elas. A v3 acrescenta duas, ambas lidas por JOIN cross-project no BigQuery publico da Base dos Dados -- **sem download e sem nova ingestao**, reaproveitando a mesma origem ja usada pela pipeline da Fase 2:
+
+| Fonte externa | Grao | Contribuicao |
+|---|---|---|
+| `basedosdados.br_inep_censo_escolar.escola` | municipio x rede x ano | Localizacao rural, biblioteca, internet, agua potavel, esgoto e energia da rede publica |
+| `basedosdados.br_inep_indicadores_educacionais.escola` | municipio x rede x ano | ATU, HAD e TDI **do 2o ano do EF**; AFD, IRD e DSU do corpo docente |
+
+**Por que municipio x rede e nao escola.** O grao de escola era o alvo, mas e inalcancavel: o `id_escola` do SAEB esta anonimizado na origem (secao 12.2). Ja o `id_municipio` casa integralmente com o Censo Escolar -- **5.547 de 5.547 municipios**, codigo IBGE de 7 digitos. Cruzando municipio com rede chega-se a **6.701 celulas** contra 5.547 municipios puros, com media de 11,66 escolas por celula; em **445 celulas ha uma unica escola**, e nelas o agregado equivale a informacao de escola.
+
+Os indicadores foram escolhidos na versao **por serie** (`atu_ef_2_ano`, `had_ef_2_ano`, `tdi_ef_2_ano`) em vez da agregada de anos iniciais, para casar exatamente com a serie do target.
 
 ### Features do modelo
 
@@ -38,6 +51,8 @@ Tabela `gold.ml_features_alunos_v2`, com grao de **aluno** (`id_aluno`), 3.354.6
 | Temporais | `taxa_alfabetizacao_escola_prior`, `n_alunos_prior_escola`, `tem_historico_escola` |
 | Territoriais | `sigla_uf_code`, `rede` |
 | Amostral | `peso_aluno` |
+| **Infraestrutura escolar** (Censo Escolar) | `pct_escolas_rurais`, `pct_escolas_biblioteca`, `pct_escolas_internet`, `pct_escolas_agua_potavel`, `pct_escolas_esgoto_publico`, `pct_escolas_energia_publica`, `n_escolas_censo_celula` |
+| **Turma e docencia** (Indicadores Educacionais) | `atu_2ano`, `had_2ano`, `tdi_2ano`, `afd_grupo1_pct`, `ird_medio`, `dsu_medio` |
 
 ## 5. Estrutura do Projeto
 
@@ -49,7 +64,7 @@ images/                      # Graficos: EDA, Feature Importance, SHAP, pergunta
 reports/                     # CSVs de metricas e analises
 src/
   preprocessing/
-    build_gold_ml.py         # Constroi gold.ml_features_alunos_v2 no BigQuery
+    build_gold_ml.py         # Constroi gold.ml_features_alunos_v3 no BigQuery
     features.py              # Split agrupado, ColumnTransformer, Pipeline unico
   modeling/
     tune.py                  # Otimizacao de hiperparametros (Optuna)
@@ -59,6 +74,7 @@ src/
     evaluate.py              # Threshold tuning (regra de negocio)
     explain.py               # Feature Importance + SHAP
     business_questions.py    # Perguntas de negocio (secao 9)
+    ab_censo_enrichment.py   # A/B do enriquecimento externo (secao 8)
   visualization/
     eda_plots.py             # Graficos da analise exploratoria
 config.py
@@ -67,7 +83,7 @@ requirements.txt
 
 ## 6. Etapas de Modelagem
 
-1. **Camada Gold ML** (`build_gold_ml.py`): integra as fontes acima no grao de aluno.
+1. **Camada Gold ML** (`build_gold_ml.py`): integra as fontes da Fase 2 no grao de aluno e acrescenta o enriquecimento externo (Censo Escolar e Indicadores Educacionais) por JOIN cross-project no BigQuery publico da Base dos Dados.
 2. **Analise exploratoria** (`notebooks/01_analise_exploratoria.ipynb` + `eda_plots.py`): distribuicoes, correlacoes, nulos e formulacao das hipoteses H1-H4.
 3. **Pipeline de pre-processamento** integrado ao modelo em um unico objeto sklearn:
    - `SimpleImputer(median)` + `StandardScaler` nas numericas;
@@ -80,7 +96,7 @@ requirements.txt
 
 ## 7. Tratamento de Data Leakage
 
-Esta foi a area de maior esforco do projeto. Cinco fontes de vazamento foram identificadas e tratadas:
+Esta foi a area de maior esforco do projeto. Cinco fontes de vazamento foram identificadas e tratadas (7.1 a 7.5); as secoes 7.6 a 7.8 documentam variaveis removidas por redundancia ou cobertura e o criterio que decide quais variaveis externas podem entrar no mesmo ano.
 
 ### 7.1 `proficiencia` define o rotulo
 `alfabetizado = 'Sim'` equivale exatamente a `proficiencia >= 743` (corte SAEB), confirmado por query direta. A variavel foi **excluida das features**.
@@ -110,6 +126,32 @@ Aplicamos `sklearn.preprocessing.TargetEncoder` em `id_municipio` e `id_escola` 
 
 `meta_2030` tem **um unico valor distinto** na base (80,0 para todos os municipios) e recebeu 0,0% de importancia. `gap_meta_2030` = `taxa_alfabetizacao_municipio - 80,0`, portanto **correlacao 1,0000** com ela. Mantidas, apareciam com 17,75% de "importancia" que na verdade era a taxa municipal reapresentada. Foram removidas das features (permanecem na gold, alimentando as analises de negocio). O ROC-AUC ficou inalterado (0,6882 -> 0,6881), confirmando que nao carregavam informacao.
 
+### 7.7 Insumo x resultado nas variaveis do Censo Escolar
+
+O enriquecimento da v3 exigiu separar, dentro da mesma fonte, o que pode entrar no mesmo ano do que precisa ser defasado. O criterio nao e a data de publicacao, e **se a variavel e insumo ou desfecho**:
+
+| Tipo | Variaveis | Tratamento |
+|---|---|---|
+| **Insumo** -- apurado no Censo de maio, anterior a prova de out/nov | infraestrutura, `atu_2ano`, `had_2ano`, `tdi_2ano`, `afd_grupo1_pct`, `ird_medio`, `dsu_medio` | Mesmo ano. Sao condicoes conhecidas antes da avaliacao e disponiveis numa predicao real. |
+| **Desfecho** -- apurado no fechamento do ano letivo | `taxa_reprovacao_ef_2_ano`, `taxa_abandono_ef_2_ano` | Defasadas (`ano + 1`). Usa-las no mesmo ano reproduziria o vazamento same-cohort da secao 7.5: sao resultado da mesma coorte, na mesma janela da prova. |
+
+`tdi_ef_2_ano` merece nota, porque a leitura apressada e classifica-la como desfecho. Distorcao idade-serie e um **estoque medido na matricula de maio** -- descreve a estrutura etaria da turma que chega, nao o que ela alcancou no fim do ano. Por isso entra no mesmo ano, junto com os demais insumos.
+
+Na pratica as duas variaveis defasadas acabaram descartadas por cobertura (secao seguinte), mas o criterio fica registrado porque e ele que sustenta manter as outras treze no mesmo ano.
+
+### 7.8 Variaveis do enriquecimento descartadas por cobertura
+
+Quatro das dezessete variaveis geradas nao entraram no modelo. Seguem na tabela gold -- mesmo tratamento dado a `meta_2030` --, para preservar o registro da tentativa:
+
+| Variavel | Cobertura | Motivo |
+|---|---|---|
+| `icg_medio` | 3,75% | `icg_nivel_complexidade_gestao_escola` e rotulo textual no INEP; o cast numerico devolve NULL em quase tudo. |
+| `taxa_reprovacao_2ano_prior` | 10,50% | **0,00% em todo o ano de 2023** -- o INEP nao publicou reprovacao de 2o ano em 2022. |
+| `taxa_abandono_2ano_prior` | 55,20% | Presente em 2024 e ausente em 2023: a propria presenca do valor viraria proxy da variavel `ano`. |
+| `tem_censo_escolar` | 100% | Variancia zero -- ao contrario de `tem_historico_escola`, nao ha o que sinalizar. |
+
+As treze restantes tem cobertura entre 83,59% e 100%.
+
 ## 8. Escolha do Algoritmo, Otimizacao e Metricas
 
 ### Otimizacao (Optuna)
@@ -126,13 +168,35 @@ Aplicamos `sklearn.preprocessing.TargetEncoder` em `id_municipio` e `id_escola` 
 
 | Modelo | Accuracy | F1-Macro | Recall (Nao Alfab.) | Recall (Alfabetizado) | ROC-AUC |
 |---|---|---|---|---|---|
-| Logistic | 62,40% | 0,6208 | 65,28% | 60,41% | 0,6828 |
-| **Random Forest (campeao)** | 62,44% | 0,6222 | **67,08%** | 59,24% | **0,6881** |
-| XGBoost | 62,67% | 0,6239 | 66,16% | 60,25% | 0,6879 |
+| Logistic | 62,19% | 0,6191 | 65,59% | 59,84% | 0,6828 |
+| **Random Forest (campeao)** | 62,54% | 0,6230 | **66,77%** | 59,63% | **0,6882** |
+| XGBoost | 62,71% | 0,6242 | 66,03% | 60,41% | 0,6881 |
 
-**Validacao da ausencia de vazamento:** o ROC-AUC de teste (0,6881) esta praticamente colado ao da validacao cruzada (0,6853). Na versao com TargetEncoder, o teste ficava 2 pontos **acima** da CV -- a assinatura do vazamento que foi corrigido.
+**Validacao da ausencia de vazamento:** o ROC-AUC de teste (0,6882) esta praticamente colado ao da validacao cruzada (0,6887) -- e de fato ligeiramente **abaixo** dela. Na versao com TargetEncoder, o teste ficava 2 pontos **acima** da CV: a assinatura do vazamento que foi corrigido.
 
-O **Random Forest** foi escolhido como campeao por combinar o maior ROC-AUC com o maior recall da classe de risco (67,08%), que e a metrica operacionalmente relevante para Busca Ativa.
+O **Random Forest** foi escolhido como campeao por combinar o maior ROC-AUC com o maior recall da classe de risco (66,77%), que e a metrica operacionalmente relevante para Busca Ativa.
+
+### A/B do enriquecimento externo: resultado negativo
+
+Reproduzivel por `python -m src.evaluation.ab_censo_enrichment`. Split, semente e hiperparametros identicos nos dois bracos -- a unica diferenca sao as 13 variaveis de Censo Escolar / Indicadores Educacionais.
+
+| Modelo | Baseline (15 features) | Enriquecido (28 features) | Delta ROC-AUC |
+|---|---|---|---|
+| Logistic | 0,682765 | 0,682820 | +0,000055 |
+| **Random Forest** | 0,688126 | 0,688183 | +0,000057 |
+| XGBoost | 0,687942 | 0,688055 | +0,000113 |
+
+**O ganho e nulo.** Os deltas estao na quinta casa decimal, ou seja, dentro do ruido. Treze variaveis novas, de fonte externa independente, no grao mais fino alcancavel, nao moveram o poder discriminativo do modelo.
+
+O controle de vazamento passou limpo: no braco enriquecido, o ROC-AUC de teste (0,6882) ficou **abaixo** do de validacao cruzada (0,6887), diferenca de -0,0005. O zero e real, e nao um ganho falso mascarando um problema.
+
+**Por que falhou, e por que o resultado importa.** A informacao municipal ja estava saturada: `taxa_alfabetizacao_municipio` e o desfecho observado daquela celula, e a infraestrutura, o corpo docente e a ruralidade sao **causas a montante desse mesmo desfecho**. Acrescentar as causas de um resultado que ja se mede diretamente nao acrescenta poder preditivo.
+
+Esse experimento converte o teto estrutural de conjectura em evidencia. Antes, o argumento era que tres algoritmos param no mesmo lugar -- sugestivo, mas compativel com limitacao de modelo. Agora ha um teste direto: variaveis genuinamente novas, de outra fonte, nao movem nada. O teto e de **informacao**, nao de metodo. E o principal insumo da secao 12.
+
+**Ressalva metodologica.** Os hiperparametros usados nos dois bracos vieram da busca Optuna feita sobre o conjunto **baseline** -- nao houve re-otimizacao para o conjunto enriquecido. A escolha e deliberada: manter os hiperparametros fixos e isolar o efeito das variaveis e o que torna o A/B interpretavel. Ela e conservadora no sentido de favorecer o baseline, entao um ganho real poderia estar sendo subestimado. Dada a magnitude observada (+0,00006, quarta casa abaixo do ruido de reamostragem), uma re-otimizacao nao alteraria a conclusao -- mas fica registrada como a evolucao natural caso o conjunto de variaveis seja ampliado no futuro.
+
+**Decisao:** as 13 variaveis foram **mantidas** no modelo final. Nao custam performance -- accuracy e F1 do campeao inclusive sobem marginalmente (62,45% -> 62,58% e 0,6222 -> 0,6233) -- e o artefato entregue passa a incorporar de fato o Censo Escolar. O ganho preditivo nulo fica documentado aqui em vez de omitido.
 
 ## 9. Aplicacao Estrategica: as cinco perguntas de negocio
 
@@ -142,18 +206,21 @@ Executavel por `python -m src.evaluation.business_questions`.
 
 | Variavel | Contribuicao |
 |---|---|
-| `taxa_alfabetizacao_municipio` | 23,76% |
-| `nivel_alfabetizacao` | 19,89% |
-| `media_portugues_municipio` | 16,29% |
-| `meta_2024` | 12,87% |
-| `proporcao_adequado_avancado` | 6,02% |
-| `proporcao_basico` | 4,67% |
-| `proporcao_abaixo_basico` | 3,50% |
-| UF (Ceara) | 2,16% |
-| `peso_aluno` | 1,96% |
-| `inse_municipio` | 1,82% |
+| `taxa_alfabetizacao_municipio` | 22,67% |
+| `nivel_alfabetizacao` | 17,68% |
+| `media_portugues_municipio` | 15,47% |
+| `meta_2024` | 12,20% |
+| `proporcao_adequado_avancado` | 5,68% |
+| `proporcao_basico` | 4,52% |
+| `proporcao_abaixo_basico` | 3,52% |
+| UF (Ceara) | 2,37% |
+| `peso_aluno` | 1,92% |
+| **`ird_medio`** (regularidade docente) | **1,87%** |
+| `inse_municipio` | 1,56% |
 
-O contexto educacional do municipio domina (~53% somando taxa, media de portugues e nivel). As **metas oficiais** contribuem com ~14% (`nivel_alfabetizacao` + `meta_2024` + participacao), confirmando que a trajetoria pactuada carrega sinal proprio. O INSE tem efeito real, porem secundario -- o territorio importa mais que a renda isolada.
+Agrupando: o **contexto educacional do municipio** (taxa, media de portugues e as tres proporcoes por nivel) responde por **51,9%**; as **metas oficiais** (`nivel_alfabetizacao`, `meta_2024`, participacao) por **31,0%**, confirmando que a trajetoria pactuada carrega sinal proprio; o **enriquecimento externo** por **6,96%**; e o INSE por apenas 1,56% -- o territorio importa mais que a renda isolada.
+
+**Um alerta metodologico que este projeto tornou concreto.** As 13 variaveis do enriquecimento absorvem 6,96% da importancia -- `ird_medio` sozinha supera o INSE --, e ainda assim o A/B da secao 8 mostrou ganho de ROC-AUC de +0,00006. **Importancia nao e contribuicao preditiva.** Quando uma variavel e redundante com outra ja presente, o Random Forest distribui splits entre as duas e a importancia se reparte, sem que o poder discriminativo aumente. Ler a tabela acima como "regularidade docente explica 1,87% da alfabetizacao" seria exatamente o erro que a remocao de `gap_meta_2030` (secao 7.6) ja havia evitado uma vez.
 
 Os graficos SHAP (`images/shap_summary_random_forest.png` e `shap_waterfall_random_forest.png`) confirmam a direcao: maiores taxas municipais e maior nivel socioeconomico deslocam positivamente a probabilidade de alfabetizacao.
 
@@ -163,7 +230,7 @@ Agregando o risco previsto (`1 - P(alfabetizado)`) por municipio, entre 4.177 mu
 
 | UF | Municipios | Risco medio |
 |---|---|---|
-| SE | 61 | 0,737 |
+| SE | 61 | 0,736 |
 | BA | 392 | 0,702 |
 | RN | 107 | 0,679 |
 | TO | 84 | 0,650 |
@@ -178,12 +245,12 @@ KMeans (k=4) sobre risco previsto, taxa real, INSE, gap ate a meta e participaca
 
 | Perfil | Municipios | Risco medio | Taxa alfabetizacao | INSE | Gap ate meta |
 |---|---|---|---|---|---|
-| **Critico** | 855 | 0,701 | 36,7% | 4,42 | -42,7 pp |
-| **Atencao** | 791 | 0,520 | 56,2% | 4,37 | -23,8 pp |
-| **Intermediario** | 1.437 | 0,441 | 64,2% | 5,21 | -15,9 pp |
-| **Consolidado** | 922 | 0,228 | 83,7% | 4,76 | +2,9 pp |
+| **Critico** | 849 | 0,704 | 36,1% | 4,41 | -43,0 pp |
+| **Atencao** | 791 | 0,517 | 56,8% | 4,39 | -23,5 pp |
+| **Intermediario** | 1.463 | 0,439 | 64,2% | 5,20 | -15,8 pp |
+| **Consolidado** | 902 | 0,226 | 83,9% | 4,75 | +3,0 pp |
 
-**Insight nao obvio:** o INSE **nao** separa os grupos de forma monotonica -- o cluster Critico (4,42) tem INSE ligeiramente **maior** que o cluster Atencao (4,37), e o Consolidado (4,76) tem INSE menor que o Intermediario (5,21). Ou seja, a diferenca entre municipios criticos e consolidados **nao e explicada primariamente por renda**, e sim por fatores territoriais e de gestao educacional. Isso e relevante para politica publica: transferencia de renda isolada nao fecharia a lacuna.
+**Insight nao obvio:** o INSE **nao** separa os grupos de forma monotonica -- o cluster Critico (4,41) tem INSE ligeiramente **maior** que o cluster Atencao (4,39), e o Consolidado (4,75) tem INSE menor que o Intermediario (5,20). Ou seja, a diferenca entre municipios criticos e consolidados **nao e explicada primariamente por renda**, e sim por fatores territoriais e de gestao educacional. Isso e relevante para politica publica: transferencia de renda isolada nao fecharia a lacuna.
 
 Detalhamento em `reports/q3_perfil_clusters.csv` e `q3_municipios_por_cluster.csv`; grafico em `images/q3_clusters_regionais.png`.
 
@@ -208,25 +275,44 @@ Em Busca Ativa, o custo de um **Falso Negativo** (nao identificar uma crianca qu
 
 | Threshold | Accuracy | Recall (risco) | Precision (risco) |
 |---|---|---|---|
-| 0,50 (padrao tecnico) | 62,44% | 67,08% | 53,20% |
-| **0,55 (regra de negocio)** | 60,17% | **76,82%** | 50,83% |
-| 0,60 | 56,12% | 86,96% | 47,96% |
-| 0,65 | 53,25% | 91,75% | 46,35% |
+| 0,50 (padrao tecnico) | 62,54% | 66,77% | 53,32% |
+| **0,55 (regra de negocio)** | 60,26% | **76,57%** | 50,90% |
+| 0,60 | 56,11% | 86,97% | 47,95% |
+| 0,65 | 53,24% | 91,76% | 46,35% |
 
-Com threshold **0,55**, a cobertura de alunos em risco sobe de 67,1% para 76,8% (**+9,7 pp**), ao custo de ~2,3 pp de acuracia -- troca vantajosa quando o custo de reforco escolar extra e menor que o de deixar uma crianca sem apoio.
+Com threshold **0,55**, a cobertura de alunos em risco sobe de 66,8% para 76,6% (**+9,8 pp**), ao custo de ~2,3 pp de acuracia -- troca vantajosa quando o custo de reforco escolar extra e menor que o de deixar uma crianca sem apoio.
 
 ## 11. Interpretacao dos Resultados e Insights
 
-1. **O territorio pesa mais que a renda.** INSE responde por apenas 1,82% da importancia, enquanto o conjunto de variaveis municipais/territoriais passa de 50%. A clusterizacao reforca: municipios criticos e consolidados tem INSE praticamente equivalente.
-2. **As metas carregam sinal proprio** (~14% da importancia). Municipios com metas iniciais mais baixas (`meta_2024`) e menor `nivel_alfabetizacao` sao sistematicamente mais frageis -- a pactuacao ja refletia a fragilidade estrutural.
+1. **O territorio pesa mais que a renda.** INSE responde por apenas 1,56% da importancia, enquanto o conjunto de variaveis municipais/territoriais passa de 50%. A clusterizacao reforca: municipios criticos e consolidados tem INSE praticamente equivalente.
+2. **As metas carregam sinal proprio** (~31% da importancia). Municipios com metas iniciais mais baixas (`meta_2024`) e menor `nivel_alfabetizacao` sao sistematicamente mais frageis -- a pactuacao ja refletia a fragilidade estrutural.
 3. **12,3% dos municipios estao em rota de nao cumprir a meta 2030** no ritmo atual.
-4. **O historico da propria escola contribui pouco isoladamente** (0,62%), mas melhorou o ROC-AUC geral -- efeito de interacao, nao de forca marginal.
-5. **Metodologia importa mais que metrica.** As correcoes de vazamento reduziram o ROC-AUC aparente de 0,7032 para 0,6881; o numero menor e o unico que representa a capacidade real de generalizacao.
+4. **O historico da propria escola contribui pouco isoladamente** (0,51%), mas melhorou o ROC-AUC geral -- efeito de interacao, nao de forca marginal.
+5. **Metodologia importa mais que metrica.** As correcoes de vazamento reduziram o ROC-AUC aparente de 0,7032 para 0,6882; o numero menor e o unico que representa a capacidade real de generalizacao.
+6. **Mais dados nao e o mesmo que mais informacao.** Treze variaveis de duas fontes externas, com boa cobertura e importancia agregada de 6,96%, nao moveram o ROC-AUC (secao 8). O gargalo do problema nao e a quantidade de variaveis -- e o grao em que elas existem.
 
 ## 12. Limitacoes do Projeto
 
-1. **Grao das variaveis explicativas.** O rotulo e individual, mas quase todo o contexto e agregado por municipio: dentro do mesmo municipio e rede, alunos recebem valores identicos. Isso impoe um teto estrutural -- ROC-AUC ~0,69 e accuracy ~62% se repetem nos tres algoritmos e em todas as versoes do pipeline, indicando limite de informacao, nao de modelo.
-2. **INSE por escola indisponivel.** `silver.inse_escola_clean` e `silver.alunos_clean` usam **namespaces distintos de `id_escola`** (0 de 42.802 escolas casam apos normalizacao). Seria o enriquecimento de maior potencial e exige uma tabela de-para externa (Censo Escolar).
+1. **Grao das variaveis explicativas -- o teto estrutural, agora demonstrado.** O rotulo e individual, mas quase todo o contexto e agregado por municipio: dentro do mesmo municipio e rede, alunos recebem valores identicos. ROC-AUC ~0,69 e accuracy ~62% se repetem nos tres algoritmos e em todas as versoes do pipeline.
+
+   O experimento da secao 8 fecha o argumento. Foram acrescentadas **13 variaveis de duas fontes externas independentes** (Censo Escolar e Indicadores Educacionais), no grao mais fino alcancavel, com cobertura de 83% a 100%. O ROC-AUC variou **+0,00006** -- ruido. Nao e que faltem variaveis: e que as variaveis disponiveis publicamente descrevem o **municipio**, e o municipio ja esta integralmente representado pela sua propria taxa de alfabetizacao observada. Infraestrutura, corpo docente e ruralidade sao causas a montante de um desfecho que o modelo ja enxerga diretamente.
+
+   O teto e de **informacao**, nao de metodo. Sair dele exige dado no grao do aluno ou da escola -- bloqueado pela anonimizacao descrita no item 2.
+2. **O grao de escola e inalcancavel: `id_escola` do SAEB esta anonimizado na origem.** Esta era a limitacao de maior potencial de ganho, e a investigacao fechou a porta em definitivo. Diagnostico por query direta contra o BigQuery publico da Base dos Dados:
+
+   | Fonte | Escolas distintas | Faixa de `id_escola` |
+   |---|---|---|
+   | `silver.alunos_clean` (SAEB) | 42.802 | 60000001 - 60042811 |
+   | `silver.inse_escola_clean` | 69.756 | 11000201 - 53068238 |
+   | `basedosdados.br_inep_censo_escolar.escola` (2023) | 217.625 | 11000023 - 53086007 |
+
+   Cruzamentos: `inse x censo` = **69.756 de 69.756 (100%)**; `saeb x censo` = **0**; `saeb x inse` = **0**.
+
+   O identificador do SAEB percorre 60000001 a 60042811 -- um intervalo de 42.811 posicoes para 42.802 escolas distintas. E um **contador sequencial atribuido na anonimizacao**, nao o `CO_ENTIDADE` do INEP; o proprio prefixo `60` nao corresponde a nenhum codigo de UF (que vao de 11 a 53). O INSE, ao contrario, casa integralmente com o Censo Escolar, o que confirma que o namespace quebrado e o do SAEB e nao o do INSE, como se supunha antes.
+
+   **Consequencia:** nenhuma tabela de-para externa resolve, porque o mapeamento nao foi publicado -- ele permanece com quem executou a anonimizacao. Qualquer enriquecimento no grao de escola esta descartado enquanto a base publica mantiver o identificador mascarado. Foi o que motivou a estrategia de descer ate **municipio x rede**, o grao mais fino ainda alcancavel (secao 4).
+
+   Verificacao complementar: a tabela de origem `basedosdados.br_inep_avaliacao_alfabetizacao.alunos` tem **12 colunas, todas ja presentes no silver** -- nao ha sexo, raca/cor, idade, turno ou localizacao a recuperar upstream. O conjunto de variaveis individuais disponiveis publicamente esta esgotado.
 3. **Correlacao ecologica.** Usar taxas municipais para prever desfecho individual implica o risco classico de inferencia ecologica: o modelo aprende "o municipio deste aluno historicamente vai bem/mal", nao causalidade sobre o aluno.
 4. **Serie temporal curta.** Apenas duas edicoes (2023, 2024). A projecao de metas e deliberadamente linear e auditavel -- qualquer modelo temporal mais sofisticado seria sobreajuste com dois pontos.
 5. **Uso restrito a suporte.** O modelo deve orientar alerta precoce e alocacao de recursos, **nunca** decisoes punitivas, ranqueamento sancionatorio ou discriminacao de escolas, alunos ou gestores.
@@ -234,14 +320,16 @@ Com threshold **0,55**, a cobertura de alunos em risco sobe de 67,1% para 76,8% 
 ## 13. Aplicacao Pratica para Politicas Publicas
 
 - **Priorizacao da Busca Ativa:** com threshold 0,55, o modelo identifica ~77% dos alunos em risco, permitindo direcionar visitas domiciliares e reforco escolar.
-- **Alocacao de recursos (FUNDEB):** os 855 municipios do cluster **Critico** e os 494 em risco alto de nao atingir a meta 2030 formam uma lista objetiva de prioridade.
+- **Alocacao de recursos (FUNDEB):** os 849 municipios do cluster **Critico** e os 494 em risco alto de nao atingir a meta 2030 formam uma lista objetiva de prioridade.
 - **Alerta antecipado de metas:** a projecao permite agir antes de 2030, nao apenas constatar o descumprimento depois.
 - **Politica alem da renda:** a evidencia de que o INSE nao separa os clusters sugere que intervencoes pedagogicas e de gestao tendem a ser mais efetivas que transferencia de renda isolada para fechar a lacuna de alfabetizacao.
 
 ## 14. Possiveis Evolucoes Futuras
 
-- Obter tabela de-para de `id_escola` (Censo Escolar/INEP) para habilitar INSE e infraestrutura no grao de escola -- maior potencial de ganho identificado.
-- Enriquecer com fontes externas municipais: PNAD, Atlas do Desenvolvimento Humano, Cadastro Unico, FUNDEB.
+- **Solicitar ao INEP o de-para de `id_escola`.** Descartado como evolucao tecnica (secao 12.2): o mapeamento nao e publico. O caminho realista e institucional -- pedido formal de acesso a microdados identificados, via convenio de pesquisa. Com ele, INSE e infraestrutura passariam ao grao de escola, e essa continua sendo a maior alavanca isolada do projeto.
+- **Questionarios contextuais do SAEB** (`TS_PROFESSOR`, `TS_DIRETOR`, `TS_ESCOLA`). No 2o ano nao ha questionario do aluno, mas o do professor traz formacao, experiencia e metodo de alfabetizacao adotado -- as unicas variaveis potencialmente acionaveis por politica publica em todo o desenho. Exige download e ingestao propria, fora do BigQuery.
+- Enriquecer com fontes externas municipais: PNAD, Atlas do Desenvolvimento Humano, Cadastro Unico, FUNDEB. Ganho preditivo esperado baixo -- sao todas do grao de municipio, ja saturado pelo INSE -- mas ampliam a cobertura de fontes citadas no enunciado.
+- **Setor censitario via geolocalizacao.** O Censo Escolar publica latitude/longitude das escolas; cruzando com os agregados do Censo Demografico 2022 por setor censitario, obtem-se contexto socioeconomico mais fino que o municipal sem depender do `id_escola`. E a unica rota identificada que contorna a anonimizacao.
 - Rodar a busca Optuna na base completa e ampliar `OPTUNA_N_TRIALS` em ambiente com mais capacidade.
 - Validacao `StratifiedGroupKFold` por `id_escola` para medir generalizacao a escolas nunca vistas.
 - Com tres ou mais edicoes, modelo de trajetoria temporal por municipio substituindo a projecao linear.

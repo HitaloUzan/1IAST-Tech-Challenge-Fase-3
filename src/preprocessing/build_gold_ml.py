@@ -15,6 +15,11 @@ BQ_DATASET_GOLD = config.BQ_DATASET_GOLD
 BQ_DATASET_SILVER = config.BQ_DATASET_SILVER
 ML_FEATURES_TABLE = config.ML_FEATURES_TABLE
 
+# Projeto publico da Base dos Dados no BigQuery -- mesma origem ja usada pela
+# ingestao da Fase 2 (pipeline-alfabetizacao/ingestion/batch/ingest_bronze.py).
+# O enriquecimento e um JOIN cross-project: nao ha download nem nova ingestao.
+BDD_PROJECT = "basedosdados"
+
 PARTITION_BY_ANO = {ML_FEATURES_TABLE}
 CLUSTER_FIELDS = {
     ML_FEATURES_TABLE: ["id_municipio", "rede"],
@@ -92,6 +97,92 @@ ML_GOLD_TABLES = {
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET_SILVER}.metas_consolidadas`
             WHERE escopo = 'municipio' AND id_municipio IS NOT NULL
             GROUP BY 1, 2
+        ),
+        -- ------------------------------------------------------------------
+        -- Enriquecimento externo: Censo Escolar + Indicadores Educacionais.
+        -- Fontes citadas nominalmente no enunciado (PDF pg.3 e pg.4).
+        --
+        -- POR QUE NO GRAO MUNICIPIO x REDE E NAO NO GRAO DE ESCOLA:
+        -- verificado por query em 31/08/2026 que silver.alunos_clean.id_escola
+        -- e um contador sequencial anonimizado na origem (60000001..60042811
+        -- para 42.802 escolas; o prefixo 60 nem e codigo de UF valido), e nao
+        -- o CO_ENTIDADE do INEP. Cruzamento com basedosdados: saeb x censo = 0.
+        -- O INSE, por contraste, casa 100% com o Censo (69.756/69.756) -- ou
+        -- seja, quem esta mascarado e o SAEB, e nao existe de-para publicado.
+        -- Ja o id_municipio casa 5.547/5.547 (IBGE, 7 digitos), entao o grao
+        -- mais fino alcancavel e municipio x rede: 6.701 celulas contra 5.547
+        -- municipios, 11,66 escolas por celula, 445 celulas com escola unica.
+        --
+        -- Dominios validados por query:
+        --   censo.rede            -> '1' federal, '2' estadual, '3' municipal, '4' privada
+        --   censo.tipo_localizacao-> '1' urbana, '2' rural
+        --   indicadores.rede      -> minusculo ('estadual', 'municipal', ...)
+        --   alunos_clean.rede     -> capitalizado ('Estadual', 'Municipal')
+        censo_municipio_rede AS (
+            -- Estrutura fisica da escola. Coletado no Censo de maio; a prova do
+            -- SAEB e aplicada em out/nov. Sao caracteristicas de ENTRADA, ja
+            -- conhecidas no momento da predicao -- mesmo ano nao vaza.
+            SELECT
+                TRIM(CAST(id_municipio AS STRING)) AS id_municipio_7dig,
+                CASE TRIM(CAST(rede AS STRING))
+                    WHEN '2' THEN 'Estadual'
+                    WHEN '3' THEN 'Municipal'
+                END AS rede,
+                CAST(ano AS INT64) AS ano,
+                AVG(CASE WHEN TRIM(CAST(tipo_localizacao AS STRING)) = '2' THEN 1.0 ELSE 0.0 END) AS pct_escolas_rurais,
+                AVG(CASE WHEN biblioteca = 1 OR biblioteca_sala_leitura = 1 THEN 1.0 ELSE 0.0 END) AS pct_escolas_biblioteca,
+                AVG(SAFE_CAST(internet AS FLOAT64)) AS pct_escolas_internet,
+                AVG(SAFE_CAST(agua_potavel AS FLOAT64)) AS pct_escolas_agua_potavel,
+                AVG(SAFE_CAST(esgoto_rede_publica AS FLOAT64)) AS pct_escolas_esgoto_publico,
+                AVG(SAFE_CAST(energia_rede_publica AS FLOAT64)) AS pct_escolas_energia_publica,
+                COUNT(*) AS n_escolas_censo_celula
+            FROM `{BDD_PROJECT}.br_inep_censo_escolar.escola`
+            WHERE ano BETWEEN 2023 AND 2024
+              AND TRIM(CAST(rede AS STRING)) IN ('2', '3')
+              AND id_municipio IS NOT NULL
+            GROUP BY 1, 2, 3
+        ),
+        indicadores_municipio_rede AS (
+            -- Turma e corpo docente no 2o ano do EF -- exatamente a serie do
+            -- target. Tambem sao insumos apurados no Censo de maio, anteriores
+            -- a prova: ATU (alunos por turma), HAD (horas-aula diarias), TDI
+            -- (distorcao idade-serie, estrutura etaria da matricula), AFD
+            -- (adequacao da formacao docente), IRD (regularidade do docente),
+            -- DSU e ICG (complexidade de gestao).
+            SELECT
+                TRIM(CAST(id_municipio AS STRING)) AS id_municipio_7dig,
+                INITCAP(TRIM(rede)) AS rede,
+                CAST(ano AS INT64) AS ano,
+                AVG(atu_ef_2_ano) AS atu_2ano,
+                AVG(had_ef_2_ano) AS had_2ano,
+                AVG(tdi_ef_2_ano) AS tdi_2ano,
+                AVG(afd_ef_anos_iniciais_grupo_1) AS afd_grupo1_pct,
+                AVG(ird_media_regularidade_docente) AS ird_medio,
+                AVG(dsu_ef_anos_iniciais) AS dsu_medio,
+                AVG(SAFE_CAST(icg_nivel_complexidade_gestao_escola AS FLOAT64)) AS icg_medio
+            FROM `{BDD_PROJECT}.br_inep_indicadores_educacionais.escola`
+            WHERE ano BETWEEN 2023 AND 2024
+              AND TRIM(rede) IN ('estadual', 'municipal')
+              AND id_municipio IS NOT NULL
+            GROUP BY 1, 2, 3
+        ),
+        rendimento_prior_municipio_rede AS (
+            -- Aprovacao/reprovacao/abandono sao RESULTADO do ano letivo, apurados
+            -- no fechamento -- na mesma janela em que a crianca faz a prova e
+            -- sobre a mesma coorte. Usar no mesmo ano seria o mesmo vazamento
+            -- same-cohort documentado na secao 7.5 do README (TargetEncoder em
+            -- id_escola). Por isso entram deslocados: ano + 1 = ano_alvo.
+            SELECT
+                TRIM(CAST(id_municipio AS STRING)) AS id_municipio_7dig,
+                INITCAP(TRIM(rede)) AS rede,
+                CAST(ano AS INT64) + 1 AS ano_alvo,
+                AVG(taxa_reprovacao_ef_2_ano) AS taxa_reprovacao_2ano_prior,
+                AVG(taxa_abandono_ef_2_ano) AS taxa_abandono_2ano_prior
+            FROM `{BDD_PROJECT}.br_inep_indicadores_educacionais.escola`
+            WHERE ano BETWEEN 2022 AND 2023
+              AND TRIM(rede) IN ('estadual', 'municipal')
+              AND id_municipio IS NOT NULL
+            GROUP BY 1, 2, 3
         )
         SELECT
             CAST(a.ano AS INT64) AS ano,
@@ -120,7 +211,27 @@ ML_GOLD_TABLES = {
             mt.meta_2024,
             mt.percentual_participacao,
             mt.nivel_alfabetizacao,
-            m.taxa_alfabetizacao_municipio - mt.meta_2030 AS gap_meta_2030
+            m.taxa_alfabetizacao_municipio - mt.meta_2030 AS gap_meta_2030,
+
+            ce.pct_escolas_rurais,
+            ce.pct_escolas_biblioteca,
+            ce.pct_escolas_internet,
+            ce.pct_escolas_agua_potavel,
+            ce.pct_escolas_esgoto_publico,
+            ce.pct_escolas_energia_publica,
+            ce.n_escolas_censo_celula,
+
+            ie.atu_2ano,
+            ie.had_2ano,
+            ie.tdi_2ano,
+            ie.afd_grupo1_pct,
+            ie.ird_medio,
+            ie.dsu_medio,
+            ie.icg_medio,
+
+            rp.taxa_reprovacao_2ano_prior,
+            rp.taxa_abandono_2ano_prior,
+            CASE WHEN ce.id_municipio_7dig IS NOT NULL THEN 1 ELSE 0 END AS tem_censo_escolar
 
         FROM `{GCP_PROJECT_ID}.{BQ_DATASET_SILVER}.alunos_clean` a
 
@@ -138,6 +249,25 @@ ML_GOLD_TABLES = {
         LEFT JOIN metas_municipio mt
             ON SUBSTR(CAST(a.id_municipio AS STRING), 1, 6) = mt.id_municipio_6dig
             AND CAST(a.ano AS INT64) = mt.ano
+
+        -- Os joins de enriquecimento usam o id_municipio COMPLETO (7 digitos,
+        -- codigo IBGE). Diferente dos joins acima, que usam 6 digitos porque as
+        -- tabelas de alfabetizacao/metas trazem o codigo sem o digito verificador.
+        -- Cobertura verificada: 5.547 de 5.547 municipios casam com o Censo.
+        LEFT JOIN censo_municipio_rede ce
+            ON TRIM(CAST(a.id_municipio AS STRING)) = ce.id_municipio_7dig
+            AND TRIM(a.rede) = ce.rede
+            AND CAST(a.ano AS INT64) = ce.ano
+
+        LEFT JOIN indicadores_municipio_rede ie
+            ON TRIM(CAST(a.id_municipio AS STRING)) = ie.id_municipio_7dig
+            AND TRIM(a.rede) = ie.rede
+            AND CAST(a.ano AS INT64) = ie.ano
+
+        LEFT JOIN rendimento_prior_municipio_rede rp
+            ON TRIM(CAST(a.id_municipio AS STRING)) = rp.id_municipio_7dig
+            AND TRIM(a.rede) = rp.rede
+            AND CAST(a.ano AS INT64) = rp.ano_alvo
 
         WHERE a.id_municipio IS NOT NULL
           AND a.id_aluno IS NOT NULL
