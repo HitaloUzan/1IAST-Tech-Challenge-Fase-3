@@ -194,6 +194,22 @@ O XGBoost desaba a partir de `max_depth >= 9` (0,675 e 0,672, bem abaixo do pico
 
 O **Random Forest** foi escolhido como campeao por combinar o maior ROC-AUC com o maior recall da classe de risco (66,77%), que e a metrica operacionalmente relevante para Busca Ativa.
 
+### A/B de `peso_aluno`: a variavel contribui de fato
+
+O professor questionou se `peso_aluno` -- o peso amostral do SAEB, usado para ponderar estimativas populacionais -- faz sentido como feature preditiva de um aluno individual, ja que a rigor descreve o desenho amostral, nao uma causa de alfabetizacao. Reproduzivel por `python -m src.evaluation.ab_peso_aluno`: mesmo split agrupado por `id_aluno`, mesma semente e mesmos hiperparametros do Optuna nos dois bracos -- a unica diferenca e a presenca da variavel.
+
+| Modelo | Com `peso_aluno` | Sem `peso_aluno` | Delta ROC-AUC |
+|---|---|---|---|
+| Logistic | 0,6828 | 0,6813 | +0,0015 |
+| **Random Forest** | 0,6881 | 0,6860 | +0,0021 |
+| XGBoost | 0,6880 | 0,6857 | +0,0024 |
+
+**O ganho e real, ao contrario do enriquecimento com Censo Escolar abaixo.** Os deltas ficam na terceira casa decimal -- 30-40x maiores que o ruido de reamostragem observado nesse mesmo projeto (compare com o +0,00006 do Censo Escolar, secao seguinte) -- e se repetem nos tres algoritmos, na mesma direcao.
+
+Controle de vazamento no braco sem `peso_aluno` (campeao Random Forest): ROC-AUC teste 0,6860 contra CV agrupada (3 folds) de 0,6866 -- teste **abaixo** da CV, sem suspeita de vazamento.
+
+**Interpretacao.** O peso amostral do SAEB corrige o desbalanceamento entre estratos (regiao, rede, porte de escola) na hora de estimar quantidades populacionais -- na pratica, funciona como um proxy do estrato de origem do aluno, informacao que as demais 27 features nao capturam diretamente. Remove-lo custa desempenho de forma consistente; a variavel foi **mantida**.
+
 ### A/B do enriquecimento externo: resultado negativo
 
 Reproduzivel por `python -m src.evaluation.ab_censo_enrichment`. Split, semente e hiperparametros identicos nos dois bracos -- a unica diferenca sao as 13 variaveis de Censo Escolar / Indicadores Educacionais.
