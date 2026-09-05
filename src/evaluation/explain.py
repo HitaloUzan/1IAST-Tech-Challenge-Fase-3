@@ -12,6 +12,7 @@ from google.cloud import bigquery
 
 import config
 from src.preprocessing.features import prepare_data
+from src.visualization.style import BLUE, apply_style
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ IMAGES_DIR = Path("images")
 
 def generate_shap_and_importance(model_filename: str = "xgboost.joblib", sample_size: int = 2000) -> None:
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    apply_style()
     model_path = MODELS_DIR / model_filename
     if not model_path.exists():
         raise FileNotFoundError(f"Modelo nao encontrado em {model_path}. Rode 'python -m src.modeling.train' antes.")
@@ -63,10 +65,10 @@ def generate_shap_and_importance(model_filename: str = "xgboost.joblib", sample_
 
         plt.figure(figsize=(10, 6))
         df_plot = df_imp.sort_values("contribuicao_pct", ascending=True)
-        plt.barh(df_plot["variavel"], df_plot["contribuicao_pct"], color="#008080")
+        plt.barh(df_plot["variavel"], df_plot["contribuicao_pct"], color=BLUE)
         plt.title(f"Fatores que mais impactam a alfabetizacao ({model_tag})", fontsize=12, fontweight="bold")
         plt.xlabel("Contribuicao relativa (%)")
-        plt.grid(axis="x", linestyle="--", alpha=0.7)
+        plt.grid(axis="x")
         plt.tight_layout()
         plt.savefig(IMAGES_DIR / f"feature_importance_{model_tag}.png", dpi=300)
         plt.close()
