@@ -84,7 +84,9 @@ requirements.txt
 ## 6. Etapas de Modelagem
 
 1. **Camada Gold ML** (`build_gold_ml.py`): integra as fontes da Fase 2 no grao de aluno e acrescenta o enriquecimento externo (Censo Escolar e Indicadores Educacionais) por JOIN cross-project no BigQuery publico da Base dos Dados.
-2. **Analise exploratoria** (`notebooks/01_analise_exploratoria.ipynb` + `eda_plots.py`): distribuicoes, correlacoes, nulos e formulacao das hipoteses H1-H4.
+2. **Analise exploratoria** (`notebooks/01_analise_exploratoria.ipynb` + `eda_plots.py`): distribuicoes, correlacoes, nulos e formulacao das hipoteses H1-H4. A disparidade territorial da Hipotese H3 (secao 7 do notebook) tem tambem um mapa coropletico por UF, gerado por `plot_taxa_alfabetizacao_uf_mapa` em `eda_plots.py` -- sugestao do Prof. Gabriel Ortelan pra tornar a disparidade mais intuitiva do que 27 barras. O proprio mapa evidenciou algo que a barra escondia: **Roraima (RR) nao tem nenhuma linha na gold** (`sigla_uf_code` so cobre 26 dos 27 estados), por isso aparece em branco.
+
+   ![Taxa de alfabetizacao por UF](images/taxa_alfabetizacao_uf_mapa.png)
 3. **Pipeline de pre-processamento** integrado ao modelo em um unico objeto sklearn:
    - `SimpleImputer(median)` + `StandardScaler` nas numericas;
    - `SimpleImputer(most_frequent)` + `OneHotEncoder` nas categoricas;
@@ -164,6 +166,24 @@ As treze restantes tem cobertura entre 83,59% e 100%.
 | Random Forest | 0,6853 | `n_estimators=376, max_depth=11, min_samples_leaf=4, max_features=sqrt` |
 | XGBoost | 0,6860 | `n_estimators=489, max_depth=6, learning_rate=0.0101, subsample=0.79, colsample_bytree=0.77, min_child_weight=4, reg_lambda=2.55` |
 
+### Por que `max_depth` difere entre Random Forest (11) e XGBoost (6)
+
+Nao e escolha manual: veio da busca Optuna (20 trials por modelo, espaco `max_depth` em [4,20] para RF e [3,10] para XGBoost). Reproduzivel por `python -m src.evaluation.depth_sensitivity`, que agrega o historico completo de `reports/optuna_study.db`:
+
+| Random Forest -- `max_depth` | 4 | 6 | 7 | 9 | 10 | **11** | 12 | 14 | 15 | 17 | 20 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| ROC-AUC medio | 0,6802 | 0,6825 | 0,6838 | 0,6850 | 0,6851 | **0,6853** | 0,6850 | 0,6839 | 0,6831 | 0,6800 | 0,6813 |
+
+| XGBoost -- `max_depth` | 3 | 4 | 5 | **6** | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|
+| ROC-AUC medio | 0,6846 | 0,6845 | 0,6852 | **0,6855** | 0,6602 | 0,6852 | 0,6752 | 0,6719 |
+
+O Random Forest forma uma curva em U invertido com pico suave em 9-12: profundidades menores (4-7) *underfittam*, e a partir de 14 o desempenho cai (arvores individuais superajustadas, mesmo com a media de 376 arvores atenuando). Isso e esperado de bagging -- arvores decorrelacionadas, profundas, com a variancia controlada pela agregacao.
+
+O XGBoost desaba a partir de `max_depth >= 9` (0,675 e 0,672, bem abaixo do pico de 0,6855). Isso e esperado de boosting sequencial: `learning_rate=0,0101` e 489 rounds significam que arvores profundas acumulam overfitting a cada round, ao inves de serem compensadas por media como no RF. `max_depth=8` (visto pelo professor no `DEFAULT_PARAMS` de fallback -- nota abaixo) ainda fica proximo do pico (0,6852), mas nao e o ponto tunado.
+
+**Nota sobre o codigo:** `DEFAULT_PARAMS` em `train.py` (`max_depth=12` RF, `max_depth=8` XGBoost) e so o **fallback** usado quando `reports/optuna_best_params.json` nao existe -- nunca entrou em producao aqui, ja que o arquivo do Optuna esta presente. Os valores efetivamente treinados sao os desta secao (11 e 6), carregados por `load_best_params()`.
+
 ### Resultados finais (teste agrupado por aluno, 670.817 registros)
 
 | Modelo | Accuracy | F1-Macro | Recall (Nao Alfab.) | Recall (Alfabetizado) | ROC-AUC |
@@ -175,6 +195,22 @@ As treze restantes tem cobertura entre 83,59% e 100%.
 **Validacao da ausencia de vazamento:** o ROC-AUC de teste (0,6882) esta praticamente colado ao da validacao cruzada (0,6887) -- e de fato ligeiramente **abaixo** dela. Na versao com TargetEncoder, o teste ficava 2 pontos **acima** da CV: a assinatura do vazamento que foi corrigido.
 
 O **Random Forest** foi escolhido como campeao por combinar o maior ROC-AUC com o maior recall da classe de risco (66,77%), que e a metrica operacionalmente relevante para Busca Ativa.
+
+### A/B de `peso_aluno`: a variavel contribui de fato
+
+O professor questionou se `peso_aluno` -- o peso amostral do SAEB, usado para ponderar estimativas populacionais -- faz sentido como feature preditiva de um aluno individual, ja que a rigor descreve o desenho amostral, nao uma causa de alfabetizacao. Reproduzivel por `python -m src.evaluation.ab_peso_aluno`: mesmo split agrupado por `id_aluno`, mesma semente e mesmos hiperparametros do Optuna nos dois bracos -- a unica diferenca e a presenca da variavel.
+
+| Modelo | Com `peso_aluno` | Sem `peso_aluno` | Delta ROC-AUC |
+|---|---|---|---|
+| Logistic | 0,6828 | 0,6813 | +0,0015 |
+| **Random Forest** | 0,6881 | 0,6860 | +0,0021 |
+| XGBoost | 0,6880 | 0,6857 | +0,0024 |
+
+**O ganho e real, ao contrario do enriquecimento com Censo Escolar abaixo.** Os deltas ficam na terceira casa decimal -- 30-40x maiores que o ruido de reamostragem observado nesse mesmo projeto (compare com o +0,00006 do Censo Escolar, secao seguinte) -- e se repetem nos tres algoritmos, na mesma direcao.
+
+Controle de vazamento no braco sem `peso_aluno` (campeao Random Forest): ROC-AUC teste 0,6860 contra CV agrupada (3 folds) de 0,6866 -- teste **abaixo** da CV, sem suspeita de vazamento.
+
+**Interpretacao.** O peso amostral do SAEB corrige o desbalanceamento entre estratos (regiao, rede, porte de escola) na hora de estimar quantidades populacionais -- na pratica, funciona como um proxy do estrato de origem do aluno, informacao que as demais 27 features nao capturam diretamente. Remove-lo custa desempenho de forma consistente; a variavel foi **mantida**.
 
 ### A/B do enriquecimento externo: resultado negativo
 
@@ -222,7 +258,12 @@ Agrupando: o **contexto educacional do municipio** (taxa, media de portugues e a
 
 **Um alerta metodologico que este projeto tornou concreto.** As 13 variaveis do enriquecimento absorvem 6,96% da importancia -- `ird_medio` sozinha supera o INSE --, e ainda assim o A/B da secao 8 mostrou ganho de ROC-AUC de +0,00006. **Importancia nao e contribuicao preditiva.** Quando uma variavel e redundante com outra ja presente, o Random Forest distribui splits entre as duas e a importancia se reparte, sem que o poder discriminativo aumente. Ler a tabela acima como "regularidade docente explica 1,87% da alfabetizacao" seria exatamente o erro que a remocao de `gap_meta_2030` (secao 7.6) ja havia evitado uma vez.
 
-Os graficos SHAP (`images/shap_summary_random_forest.png` e `shap_waterfall_random_forest.png`) confirmam a direcao: maiores taxas municipais e maior nivel socioeconomico deslocam positivamente a probabilidade de alfabetizacao.
+![Feature Importance - Random Forest](images/feature_importance_random_forest.png)
+
+Os graficos SHAP confirmam a direcao: maiores taxas municipais e maior nivel socioeconomico deslocam positivamente a probabilidade de alfabetizacao.
+
+![SHAP Summary - Random Forest](images/shap_summary_random_forest.png)
+![SHAP Waterfall - Random Forest](images/shap_waterfall_random_forest.png)
 
 ### 9.2 Quais municipios apresentam maior risco educacional?
 
@@ -237,7 +278,9 @@ Agregando o risco previsto (`1 - P(alfabetizado)`) por municipio, entre 4.177 mu
 | AP | 16 | 0,624 |
 | PA | 143 | 0,608 |
 
-Ranking completo em `reports/q2_ranking_municipios_risco.csv`; grafico em `images/q2_municipios_risco.png`. A concentracao no Norte/Nordeste e consistente com a geografia educacional conhecida do pais.
+Ranking completo em `reports/q2_ranking_municipios_risco.csv`. A concentracao no Norte/Nordeste e consistente com a geografia educacional conhecida do pais.
+
+![Municipios com maior risco educacional](images/q2_municipios_risco.png)
 
 ### 9.3 Quais regioes possuem padroes semelhantes?
 
@@ -252,7 +295,9 @@ KMeans (k=4) sobre risco previsto, taxa real, INSE, gap ate a meta e participaca
 
 **Insight nao obvio:** o INSE **nao** separa os grupos de forma monotonica -- o cluster Critico (4,41) tem INSE ligeiramente **maior** que o cluster Atencao (4,39), e o Consolidado (4,75) tem INSE menor que o Intermediario (5,20). Ou seja, a diferenca entre municipios criticos e consolidados **nao e explicada primariamente por renda**, e sim por fatores territoriais e de gestao educacional. Isso e relevante para politica publica: transferencia de renda isolada nao fecharia a lacuna.
 
-Detalhamento em `reports/q3_perfil_clusters.csv` e `q3_municipios_por_cluster.csv`; grafico em `images/q3_clusters_regionais.png`.
+Detalhamento em `reports/q3_perfil_clusters.csv` e `q3_municipios_por_cluster.csv`.
+
+![Agrupamento de municipios por padrao educacional](images/q3_clusters_regionais.png)
 
 ### 9.4 Como prever municipios que podem nao atingir metas futuras?
 
@@ -267,7 +312,9 @@ Projecao ate 2030 comparando a taxa atual com a meta oficial e o ritmo anual nec
 
 **494 municipios precisariam evoluir mais de 7 pontos percentuais ao ano** ate 2030 -- ritmo sem precedente historico na serie. Os casos mais extremos exigiriam mais de 12 pp/ano (ex.: municipios em RN, BA, SE e TO partindo de taxas abaixo de 10%).
 
-Lista completa em `reports/q4_municipios_risco_meta.csv`; grafico em `images/q4_projecao_metas.png`.
+Lista completa em `reports/q4_municipios_risco_meta.csv`.
+
+![Projecao de atingimento da meta 2030](images/q4_projecao_metas.png)
 
 ## 10. Decisao de Negocio: Threshold Tuning para Busca Ativa
 

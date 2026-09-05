@@ -21,6 +21,11 @@ MODELS_DIR = Path("models")
 REPORTS_DIR = Path("reports")
 BEST_PARAMS_PATH = REPORTS_DIR / "optuna_best_params.json"
 
+# FALLBACK apenas -- usados so se reports/optuna_best_params.json nao existir
+# (ver load_best_params() abaixo). Os hiperparametros de fato usados no treino
+# final e reportados no README (secao 8) sao os tunados pelo Optuna: RF
+# max_depth=11, XGBoost max_depth=6. Ver src/evaluation/depth_sensitivity.py
+# para a analise de por que essas profundidades (e nao estas aqui) fazem sentido.
 DEFAULT_PARAMS = {
     "logistic": {"C": 1.0},
     "random_forest": {
