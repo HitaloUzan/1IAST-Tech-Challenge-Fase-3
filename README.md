@@ -84,7 +84,7 @@ requirements.txt
 ## 6. Etapas de Modelagem
 
 1. **Camada Gold ML** (`build_gold_ml.py`): integra as fontes da Fase 2 no grao de aluno e acrescenta o enriquecimento externo (Censo Escolar e Indicadores Educacionais) por JOIN cross-project no BigQuery publico da Base dos Dados.
-2. **Analise exploratoria** (`notebooks/01_analise_exploratoria.ipynb` + `eda_plots.py`): distribuicoes, correlacoes, nulos e formulacao das hipoteses H1-H4.
+2. **Analise exploratoria** (`notebooks/01_analise_exploratoria.ipynb` + `eda_plots.py`): distribuicoes, correlacoes, nulos e formulacao das hipoteses H1-H4. A disparidade territorial da Hipotese H3 (secao 7 do notebook) tem tambem um mapa coropletico por UF (`images/taxa_alfabetizacao_uf_mapa.png`, gerado por `plot_taxa_alfabetizacao_uf_mapa` em `eda_plots.py`), sugestao do Prof. Gabriel Ortelan pra tornar a disparidade mais intuitiva do que 27 barras -- o proprio mapa evidenciou algo que a barra escondia: **Roraima (RR) nao tem nenhuma linha na gold** (`sigla_uf_code` so cobre 26 dos 27 estados), por isso aparece em branco.
 3. **Pipeline de pre-processamento** integrado ao modelo em um unico objeto sklearn:
    - `SimpleImputer(median)` + `StandardScaler` nas numericas;
    - `SimpleImputer(most_frequent)` + `OneHotEncoder` nas categoricas;
