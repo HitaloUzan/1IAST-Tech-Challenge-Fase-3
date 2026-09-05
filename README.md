@@ -84,7 +84,7 @@ requirements.txt
 ## 6. Etapas de Modelagem
 
 1. **Camada Gold ML** (`build_gold_ml.py`): integra as fontes da Fase 2 no grao de aluno e acrescenta o enriquecimento externo (Censo Escolar e Indicadores Educacionais) por JOIN cross-project no BigQuery publico da Base dos Dados.
-2. **Analise exploratoria** (`notebooks/01_analise_exploratoria.ipynb` + `eda_plots.py`): distribuicoes, correlacoes, nulos e formulacao das hipoteses H1-H4. A disparidade territorial da Hipotese H3 (secao 7 do notebook) tem tambem um mapa coropletico por UF, gerado por `plot_taxa_alfabetizacao_uf_mapa` em `eda_plots.py` -- sugestao do Prof. Gabriel Ortelan pra tornar a disparidade mais intuitiva do que 27 barras. O proprio mapa evidenciou algo que a barra escondia: **Roraima (RR) nao tem nenhuma linha na gold** (`sigla_uf_code` so cobre 26 dos 27 estados), por isso aparece em branco.
+2. **Analise exploratoria** (`notebooks/01_analise_exploratoria.ipynb` + `eda_plots.py`): distribuicoes, correlacoes, nulos e formulacao das hipoteses H1-H4. A disparidade territorial da Hipotese H3 (secao 7 do notebook) tem tambem um mapa coropletico por UF, gerado por `plot_taxa_alfabetizacao_uf_mapa` em `eda_plots.py` -- sugestao do Prof. Gabriel Ortelan pra tornar a disparidade mais intuitiva do que 27 barras. O proprio mapa evidenciou algo que a barra escondia: **Roraima (RR) nao tem nenhuma linha na gold** (`sigla_uf_code` so cobre 26 dos 27 estados), por isso aparece hachurada.
 
    ![Taxa de alfabetizacao por UF](images/taxa_alfabetizacao_uf_mapa.png)
    *Legenda: quanto mais escuro o azul, maior o % de alunos alfabetizados naquela UF. Roraima aparece hachurada -- sem nenhuma linha na gold.*
