@@ -164,6 +164,24 @@ As treze restantes tem cobertura entre 83,59% e 100%.
 | Random Forest | 0,6853 | `n_estimators=376, max_depth=11, min_samples_leaf=4, max_features=sqrt` |
 | XGBoost | 0,6860 | `n_estimators=489, max_depth=6, learning_rate=0.0101, subsample=0.79, colsample_bytree=0.77, min_child_weight=4, reg_lambda=2.55` |
 
+### Por que `max_depth` difere entre Random Forest (11) e XGBoost (6)
+
+Nao e escolha manual: veio da busca Optuna (20 trials por modelo, espaco `max_depth` em [4,20] para RF e [3,10] para XGBoost). Reproduzivel por `python -m src.evaluation.depth_sensitivity`, que agrega o historico completo de `reports/optuna_study.db`:
+
+| Random Forest -- `max_depth` | 4 | 6 | 7 | 9 | 10 | **11** | 12 | 14 | 15 | 17 | 20 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| ROC-AUC medio | 0,6802 | 0,6825 | 0,6838 | 0,6850 | 0,6851 | **0,6853** | 0,6850 | 0,6839 | 0,6831 | 0,6800 | 0,6813 |
+
+| XGBoost -- `max_depth` | 3 | 4 | 5 | **6** | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|
+| ROC-AUC medio | 0,6846 | 0,6845 | 0,6852 | **0,6855** | 0,6602 | 0,6852 | 0,6752 | 0,6719 |
+
+O Random Forest forma uma curva em U invertido com pico suave em 9-12: profundidades menores (4-7) *underfittam*, e a partir de 14 o desempenho cai (arvores individuais superajustadas, mesmo com a media de 376 arvores atenuando). Isso e esperado de bagging -- arvores decorrelacionadas, profundas, com a variancia controlada pela agregacao.
+
+O XGBoost desaba a partir de `max_depth >= 9` (0,675 e 0,672, bem abaixo do pico de 0,6855). Isso e esperado de boosting sequencial: `learning_rate=0,0101` e 489 rounds significam que arvores profundas acumulam overfitting a cada round, ao inves de serem compensadas por media como no RF. `max_depth=8` (visto pelo professor no `DEFAULT_PARAMS` de fallback -- nota abaixo) ainda fica proximo do pico (0,6852), mas nao e o ponto tunado.
+
+**Nota sobre o codigo:** `DEFAULT_PARAMS` em `train.py` (`max_depth=12` RF, `max_depth=8` XGBoost) e so o **fallback** usado quando `reports/optuna_best_params.json` nao existe -- nunca entrou em producao aqui, ja que o arquivo do Optuna esta presente. Os valores efetivamente treinados sao os desta secao (11 e 6), carregados por `load_best_params()`.
+
 ### Resultados finais (teste agrupado por aluno, 670.817 registros)
 
 | Modelo | Accuracy | F1-Macro | Recall (Nao Alfab.) | Recall (Alfabetizado) | ROC-AUC |
